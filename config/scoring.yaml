@@ -1,0 +1,112 @@
+# AlloTF V1 scoring. REVISED after GPT-5.6 review.
+# Every number here is a RELATIVE proxy on one scaffold. Never report as Kd.
+
+# ---------------------------------------------------------------------------
+# Calibration - MANDATORY. Absolute energies are not comparable across structures, operators or
+# force-field preparation, so no gate uses a raw zero. Every gate is expressed in units of the
+# scaffold's OWN WT controls, scored with the SAME preparation:
+#   wt_apo             WT, no ligand        -> the "not constitutive" reference
+#   wt_native_holo     WT + native effector -> a known working switch (positive control)
+#   known_constitutive known always-ON      -> negative control, MUST be rejected
+#   known_dead         known non-responder  -> negative control, MUST be rejected
+# A scaffold that cannot reproduce its own controls is REJECTED before any design is generated.
+calibration:
+  required: true
+  controls: [wt_apo, wt_native_holo, known_constitutive, known_dead]
+  margin_sigma: 1.0            # gate fires at: control_value +/- margin_sigma * sigma(control)
+  robustness:                  # sign+margin must survive all of these before a candidate is trusted
+    min_structure_pairs: 2     # independent experimental X_D / X_I pairs
+    min_poses: 3               # independent target poses
+    min_protonation_states: 2  # protonation / tautomer variants of the target
+    require_consistent_sign: true
+
+# ---------------------------------------------------------------------------
+# Regulatory topology. Do NOT hard-code the release sign: corepressors (PurR) invert it -
+# effector binding STRENGTHENS DNA binding. Route/QC sets this per scaffold.
+topology:
+  mode: auto     # auto | inducible_repressor (release_sign=+1) | corepressor (release_sign=-1)
+
+# ---------------------------------------------------------------------------
+# Hard gates, cheapest and most decisive first.
+# fail_closed: a missing feature is a REJECT, never a default-pass.
+fail_closed: true
+
+hard_gates:
+  # 1. binding must actually happen. Without this, a non-binder (+100 vs +99) passes on
+  #    state preference alone.
+  target_binding:
+    metric: E_L_I
+    max: "wt_native_holo + 1.0*sigma"
+
+  # 2. NOT constitutive. THE fatal omission of the first draft: without an apo-bias gate a mutant
+  #    that already prefers X_I with no ligand passes everything else.
+  apo_state_bias:
+    metric: dG_apo                       # E(C_A_I) - E(C_A_D)
+    min: "wt_apo + 1.0*sigma"
+
+  # 3. the ligand must be what shifts the population (linkage, not a by-product)
+  coupling:
+    metric: ddG_coupling                 # dG_lig - dG_apo
+    max: "wt_native_holo - 1.0*sigma"
+
+  # 3b. the LIGAND-BOUND protein must actually prefer the induced state. ddG_coupling<0 alone can be
+  #     bought by an apo state that prefers D so strongly the ligand never overcomes it
+  #     (D0=0,I0=20,DL=-10,IL=0 -> ddG_coup=-10 yet the holo protein is still 0 REU more stable in
+  #     D: a non-switch). Gating dG_lig<0 directly closes it. Found by GPT-5.6.
+  ligand_prefers_induced:
+    metric: dG_lig                       # E(IL) - E(DL)
+    max: "wt_native_holo + 1.0*sigma"
+
+  # 4. apo must still hold the operator (vs WT apo, same operator + preparation)
+  apo_dna_competence:
+    metric: E_DNA_X_D
+    max: "wt_apo + 1.0*sigma"
+
+  # 5. the induced state must let go; sign comes from topology.mode, not hard-coded
+  dna_release:
+    metric: S_release
+    min: "wt_native_holo - 1.0*sigma"
+    apply_sign_from_topology: true
+
+  # 6. selectivity is an objective, so it needs a gate
+  specificity:
+    metric: S_specificity                # E(best decoy) - E(target)
+    min: "0.5*sigma"
+
+  # 7. per-state integrity. "clash == 0" is meaningless without a counting convention - compare
+  #    to WT after identical repacking instead.
+  state_integrity:
+    fold_clash:      {metric: clash_count, max: "wt_apo + 2.0*sigma"}
+    packing:         {require_all_states_packed: true}
+    ligand_strain:   {max: 2.0}
+    pose_confidence: {min: 0.5}
+
+  # 8. allosteric template similarity. On IMPOSED backbones this is partly tautological, so it is
+  #    used ONLY to reject designs that clearly break the path - never as positive evidence of
+  #    coupling. Calibrated against known dead mutants, not the arbitrary 0.5 of the first draft.
+  allosteric_template:
+    metric: template_similarity
+    min: "known_dead + 1.0*sigma"
+    scope: transduction_and_output_only  # the pocket is expected to differ - do not score it
+
+# ---------------------------------------------------------------------------
+# Only candidates passing ALL gates reach ranking. Pareto, not a weighted sum: a candidate that
+# fails any gate is not a sensor no matter how well it binds.
+pareto_objectives:
+  - target_binding
+  - ddG_coupling
+  - dna_release
+  - specificity
+  - fold_stability
+  - allosteric_template
+
+tie_break_weights:      # used only inside the Pareto front
+  ddG_coupling:   0.35
+  target_binding: 0.25
+  dna_release:    0.20
+  specificity:    0.15
+  fold_stability: 0.05
+
+diversity:
+  cluster_identity: 0.9
+  max_per_cluster: 3

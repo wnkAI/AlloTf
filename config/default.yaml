@@ -1,0 +1,62 @@
+# AlloTF V1 default config
+target:
+  name: null            # e.g. xylitol
+  smiles: null          # resolved from name if absent
+
+objective:
+  mode: auto            # auto | enhancement | retargeting
+  preserve_native_response: false
+  operator_sequence: null
+
+route:
+  top_scaffolds: 3
+  min_structure_tier: 2   # 1 = experimental apo/holo/DNA, 2 = DNA state homology-modelled
+
+design:
+  # The DESIGN METHOD is ours; the atom-level ENERGY is PyRosetta's. Two different things.
+  #   generator        our chemistry prefilter + rotamer/sequence search
+  #   fast_prefilter   our scoring.py - clash and geometry screening ONLY, not a force field
+  #   repacking_backend/score_function
+  #                    PyRosetta ref2015 for repack, restrained minimisation and energy
+  #   final_ranking    multistate linkage - NOT the ref2015 total score
+  #
+  # Why we do not use the ref2015 TOTAL score to rank designs, yet trust it for STATE DIFFERENCES:
+  # ref is a per-residue-composition constant. For one sequence scored in four states it is the
+  # same constant, so it cancels exactly in
+  #     ddG_coup = [E(I_L) - E(D_L)] - [E(I_0) - E(D_0)]
+  # The allosteric conclusion therefore never rests on ref, on Rosetta's absolute scale, or on any
+  # fitted total. It rests on how one sequence responds to changing state.
+  generator: physallo            # physallo | physics | ligandmpnn_benchmark(baseline only)
+  fast_prefilter: custom         # our scoring.py: clash/geometry screen before Rosetta is called
+  repacking_backend: pyrosetta
+  score_function: ref2015
+  final_ranking: multistate_linkage
+  raw_designs: 10000
+  max_mutations: 6
+  design_both_backbones: true
+
+  physallo:
+    # per-position allowed amino acids are PRE-FILTERED by pocket geometry/chemistry,
+    # not left open to all 20
+    aa_per_position: [3, 8]        # min, max after filtering
+    rotamer_library: dunbrack      # dunbrack | simple
+    rotamer_chi_levels: [3, 3, 2, 2]   # sampling per chi1..chi4
+    search: simulated_annealing    # beam | monte_carlo | simulated_annealing | genetic
+    search_steps: 20000
+    n_restarts: 8
+    # local physics used during the search (full six-state linkage happens downstream)
+    local_terms: [vdw, coulomb, hbond, solvation, strain, unsat_polar]
+
+  ligandmpnn:              # benchmark only - never the production path
+    checkpoint: null
+    temperature: 0.2
+    batch: 32
+
+state_builder:
+  repack_shell: 8.0
+  minimize: restrained    # sidechain repack + restrained local min, NO MD
+  backbone_restraint: 0.5
+
+output:
+  final_designs: 96
+  project_dir: outputs

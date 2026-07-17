@@ -1,0 +1,46 @@
+tf_name,uniprot,n_apo,n_holo,n_dna,n_ternary,tier,tier_note,dna_pdbs,holo_pdbs
+TetR,P0ACT4,13,36,1,0,1,experimental apo/holo/DNA available,1QPI,1ORK;2FJ1;2O7O;2TCT
+QacR,P0A0N4,2,11,1,0,1,experimental apo/holo/DNA available,1JT0,1JT6;1JTX;1JTY;1JUM
+TtgR,Q9AIU0,2,8,0,0,2,holo only - DNA state needs family homology model,,2UXH;2UXI;2UXO;2UXP
+RamR,Q8ZR43,2,8,0,0,2,holo only - DNA state needs family homology model,,6KO7;6KO8;6KO9;7N4Z
+EthR,P9WMC1,2,86,0,0,2,holo only - DNA state needs family homology model,,1T56;1U9N;1U9O;3G1L
+KstR,P96856,2,3,3,0,1,experimental apo/holo/DNA available,5FMP;5UA1;5UA2,5AQC;5CW8;5CXI
+DesT,Q9HUS3,0,1,2,0,1,experimental apo/holo/DNA available,3LSP;3LSR,3LSJ
+FasR,O05858,0,2,1,0,1,experimental apo/holo/DNA available,6O6P,6O6N;6O6O
+AibR,Q1D4I5,1,1,0,1,1,experimental apo/holo/DNA available,5K7Z,5K7H
+AvaR1,Q82H41,1,1,1,0,1,experimental apo/holo/DNA available,6WPA,6WP9
+CmeR,,0,0,0,0,3,no UniProt resolved,,
+EilR,E3G817,0,2,1,0,1,experimental apo/holo/DNA available,5VL9,5VLG;5VLM
+LacI,P03023,8,4,10,3,1,experimental apo/holo/DNA available,1CJG;1L1M;1LBG;1LCC,1LBH;1TLF;2P9H;2PAF
+PurR,P0ACP7,4,0,0,22,1,experimental apo/holo/DNA available,1BDH;1BDI;1JFS;1JFT,
+RbsR,P0ACQ0,0,1,1,0,1,experimental apo/holo/DNA available,9NY8,9NY7
+GalR,P03024,0,0,0,0,3,no structure,,
+GalS,P25748,0,0,0,0,3,no structure,,
+TreR,P36673,1,0,0,0,3,no ligand-bound structure,,
+CytR,P0ACN7,1,0,0,0,3,no ligand-bound structure,,
+Cra,P0ACP1,3,0,0,0,3,no ligand-bound structure,,
+ScrR,Q54430,0,0,0,0,3,no structure,,
+XylR_Bsu,P94490,0,0,0,0,3,no structure,,
+NagC,P0AF20,0,0,0,0,3,no structure,,
+NagR,O34817,1,2,2,0,1,experimental apo/holo/DNA available,4U0Y;4WWC,4U0V;4U0W
+Mlc,P50456,2,0,0,0,3,no ligand-bound structure,,
+AraC,P0A9E0,3,2,0,0,2,holo only - DNA state needs family homology model,,2AAC;2ARC
+XylR_Eco,P0ACI3,1,1,0,0,2,holo only - DNA state needs family homology model,,4FE7
+MelR,P0ACH8,0,0,0,0,3,no structure,,
+RhaR,Q8X7B3,0,0,0,0,3,no structure,,
+XylS,P07859,0,0,0,0,3,no structure,,
+MarR,P27245,4,1,1,0,1,experimental apo/holo/DNA available,5H3R,1JGS
+OhrR,O34777,1,0,1,0,3,no ligand-bound structure,1Z9C,
+HucR,,0,0,0,0,3,no UniProt resolved,,
+GntR,P0ACP5,0,0,0,0,3,no structure,,
+FadR,B6I9P8,0,0,0,0,3,no structure,,
+BenM,O68014,11,1,1,1,1,experimental apo/holo/DNA available,4IHT;4IHS,2F7A
+CatM,P07774,2,2,0,0,2,holo only - DNA state needs family homology model,,2F7C;3GLB
+BmrR,P39075,2,1,1,13,1,experimental apo/holo/DNA available,3D70;1EXI;1EXJ;1R8E,2BOW
+CueR,Q8XD09,0,0,0,0,3,no structure,,
+ZntR,P0ACS6,0,0,0,0,3,no structure,,
+PbrR,,0,0,0,0,3,no UniProt resolved,,
+MerR,P0A2Q9,0,0,0,0,3,no structure,,
+PsiR,A0A286LEZ9,0,0,0,0,3,no structure,,
+HrtR,,0,0,0,0,3,no UniProt resolved,,
+QdoR,,0,0,0,0,3,no UniProt resolved,,

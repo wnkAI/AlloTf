@@ -1,0 +1,9 @@
+# empirical terms for utils/energy.py - relative proxies only
+terms:
+  hbond:         {weight: 1.0, max_dist: 3.5, max_angle: 60}
+  salt_bridge:   {weight: 1.2, max_dist: 4.0}
+  vdw:           {weight: 1.0, clash_dist: 2.2, contact_dist: 4.5}
+  electrostatic: {weight: 0.8, dielectric: 4.0}
+  solvation:     {weight: 0.5}
+  buried_unsat_polar: {penalty: 2.0}
+backend: internal    # internal | rosetta | foldx
