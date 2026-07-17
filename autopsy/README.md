@@ -105,3 +105,5 @@ python autopsy/run_autopsy.py --scaffold TetR --out autopsy/report_TetR.json
 
 All six probes need the frozen checkpoint. Probe 6 additionally needs one canonical TtgR backbone
 + 9 uniformly built ligand poses (see above) - it is not structure-free.
+
+Diagnostic probes for dissecting LigandMPNN pocket log-likelihoods.
