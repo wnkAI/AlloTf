@@ -67,11 +67,89 @@ class PhysAlloDesignBackend(DesignBackend):
     production = True
 
     def propose(self, ctx, n):
-        raise NotImplementedError("TODO(C/D): see pipeline/physallo/ - AA prefilter, rotamer "
-                                  "search, multistate linkage")
+        """Generate n pocket candidates on the induced-state scaffold.
+
+        aa_filter (in prepare) -> joint sequence+rotamer annealing (backend.design, fast in-house
+        energy) -> fast clash reject relative to WT -> unified candidate records. The in-house
+        energy is a PREFILTER only: it decides which candidates are worth the expensive six-state
+        PyRosetta pass, never the final ranking. Its optimum is poly-Gly, so nothing here is
+        allowed to survive as a score - state_builder re-scores every survivor under ref2015.
+        """
+        import numpy as np
+        from .physallo import backend as pb
+
+        st = ctx["states"]
+        masks = ctx["masks"]
+        dcfg = ctx["cfg"]["design"]
+        # design on the induced holo backbone: that is the conformation the ligand must stabilise
+        scaffold = st["paths"].get("X_I_lig") or st["paths"].get("X_I")
+        if not scaffold:
+            raise RuntimeError("no induced-state scaffold (X_I_lig / X_I) to design on")
+        ligand_resname = st.get("effector_resname")
+        chain = st.get("chain", "A")
+
+        # recognition is free; transduction is designed under a tighter mask; protected is fixed
+        design_positions = list(masks["recognition_mask"])
+        mask_of = {p: "recognition" for p in design_positions}
+        for p in masks.get("transduction_mask", []):
+            mask_of[p] = "transduction"
+            if p not in design_positions:
+                design_positions.append(p)
+        if not design_positions:
+            raise RuntimeError("empty recognition mask: nothing to design")
+
+        pctx = pb.prepare(scaffold, design_positions, ligand_resname, chain, masks=mask_of)
+        raw, space, efn = pb.design(
+            pctx,
+            n_candidates=max(n * 3, n + 10),
+            n_steps=dcfg.get("search_steps", 4000),
+            n_restarts=dcfg.get("search_restarts", 8),
+            seed=dcfg.get("seed", 0))
+
+        wt_e = efn(space.wt_state(np.random.RandomState(0)))
+        clash_margin = dcfg.get("fast_clash_margin", 25.0)
+
+        out = []
+        for c in raw:
+            if c["energy"] > wt_e + clash_margin:      # fast clash / strain reject vs WT
+                continue
+            residues = {p: c["state"][p][0] for p in c["state"]}
+            out.append({
+                "candidate_id": "cand_%04d" % len(out),
+                "sequence": c["seq"],
+                "mutations": c["mutations"],           # [(pos, wt, mut)] relative to WT
+                "residues": residues,                  # {resnum: resname} for state_builder
+                "rotamers": {p: c["state"][p][1] for p in c["state"]},
+                "fast_score": c["energy"],
+                "structure_path": scaffold,
+            })
+            if len(out) >= n:
+                break
+        if not out:
+            raise RuntimeError("PhysAllo produced no candidate within %.1f of WT (%d searched): "
+                               "the pocket may be too constrained, or the clash margin too tight"
+                               % (clash_margin, len(raw)))
+        return out
 
     def score(self, seq, state_path, pose, cfg):
-        raise NotImplementedError
+        """Fast in-house energy of one sequence on a backbone. PREFILTER / benchmark comparison
+        only - not a production ranking (see propose). Needs cfg['design_positions'] and, if the
+        pocket has a ligand, cfg['ligand_resname']; refuses rather than guess the design set."""
+        from .physallo import backend as pb
+        dp = cfg.get("design_positions")
+        if not dp:
+            raise ValueError("score needs cfg['design_positions'] to know which positions vary")
+        pctx = pb.prepare(state_path, list(dp), cfg.get("ligand_resname"),
+                          cfg.get("chain", "A"))
+        efn = pb.make_energy_fn(pctx)
+        from .physallo.aa_filter import one
+        state = {}
+        for i, p in enumerate(pctx.positions):
+            want = seq[i] if i < len(seq) else None
+            aa = next((a for a in pctx.allowed[p] if one(a) == want), pctx.allowed[p][0])
+            rots = pb.rotamers.rotamers(aa) or [()]
+            state[p] = (aa, rots[0])
+        return efn(state)
 
     def supports_negative_design(self):
         return True
@@ -121,9 +199,12 @@ def get_backend(name):
 
 def run(ctx):
     """requires ctx['states'], ctx['poses'], ctx['masks'];  produces ctx['candidates']"""
-    name = ctx["cfg"]["design"]["backend"]
+    dcfg = ctx["cfg"]["design"]
+    name = dcfg.get("backend", dcfg.get("generator", "physallo"))
     be = get_backend(name)
     if not be.production:
         raise SystemExit("backend '%s' is benchmark-only and must not generate production "
-                         "candidates. Set design.backend to a production backend." % name)
-    return dict(ctx, candidates=be.propose(ctx, ctx["cfg"]["design"]["raw_designs"]))
+                         "candidates. Set design.generator to a production backend." % name)
+    n = dcfg.get("initial_designs", dcfg.get("raw_designs", 8))
+    proposed = be.propose(ctx, n)
+    return dict(ctx, candidates={c["candidate_id"]: c for c in proposed})

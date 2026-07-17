@@ -180,8 +180,11 @@ def run(ctx):
 
     out, failures = {}, {}
     for cid, cand in ctx["candidates"].items():
+        # design.propose emits full records; the {resnum: resname} map lives in 'residues'.
+        # A bare dict (tests) is used as-is.
+        residues = cand["residues"] if isinstance(cand, dict) and "residues" in cand else cand
         try:
-            terms = build_six(backend, cand, templates, design_positions, second_shell, chain)
+            terms = build_six(backend, residues, templates, design_positions, second_shell, chain)
         except Exception as exc:
             # a candidate whose states could not be built is dropped, never zero-filled:
             # a zero here reads as "neutral energy" and sails through every gate.
