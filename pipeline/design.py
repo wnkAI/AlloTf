@@ -238,6 +238,10 @@ def run(ctx):
     if not be.production:
         raise SystemExit("backend '%s' is benchmark-only and must not generate production "
                          "candidates. Set design.generator to a production backend." % name)
-    n = dcfg.get("initial_designs", dcfg.get("raw_designs", 8))
-    proposed = be.propose(ctx, n)
+    # Generate a POOL, not just the first plate. Only initial_designs go on plate 1; the rest stay
+    # in the project as the untested pool select-next draws round two from. Sizing the run to
+    # initial_designs leaves that pool empty and the bandit with nothing to propose.
+    n_initial = dcfg.get("initial_designs", 8)
+    n_pool = dcfg.get("pool_designs") or max(n_initial * 10, 50)
+    proposed = be.propose(ctx, n_pool)
     return dict(ctx, candidates={c["candidate_id"]: c for c in proposed})

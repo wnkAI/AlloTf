@@ -135,6 +135,21 @@ def dna_affinity(energies, state):
     return energies[dna] - energies[apo]
 
 
+def _template_similarity(backend, pose, native_contacts, resnums, chain="A"):
+    """Jaccard overlap of the transduction+output contact network, candidate vs native.
+
+    The allosteric path is a NETWORK, so it is compared as one: how much of the native contact
+    network on the transduction and output residues does this candidate still have? The pocket is
+    excluded upstream - it is meant to differ. Returns None if neither network has any contact,
+    rather than 1.0, because "no network on either side" is not perfect preservation.
+    """
+    cand = backend.contact_pairs(pose, resnums, chain=chain)
+    union = native_contacts | cand
+    if not union:
+        return None
+    return len(native_contacts & cand) / len(union)
+
+
 def dna_release(energies, topology_sign=+1):
     """S_release = [E(I.DNA) - E(I0)] - [E(D.DNA) - E(D0)], sign from topology (corepressors: -1).
 
@@ -192,6 +207,26 @@ def run(ctx):
     # in rank.apply_gates via release_sign(). Applying it in both places squared it and a
     # corepressor lost its inversion, (-1)^2 = +1 (GPT-5.6).
 
+    # pose confidence comes from pose.py and is a property of the TARGET PLACEMENT on this
+    # scaffold, shared by every candidate - it is not per-sequence and this stage cannot invent it
+    poses = ctx.get("poses") or {}
+    pose_conf = poses.get("confidence")
+
+    # the native transduction+output network this scaffold's candidates are compared against.
+    # Built once from the native induced state; the pocket is deliberately NOT included (it is
+    # supposed to differ - that is the design).
+    tpl = ctx.get("template") or {}
+    path_resnums = sorted(int(rn) for rn, r in (tpl.get("residues") or {}).items()
+                          if r.get("class") in ("transduction", "output"))
+    native_contacts = None
+    if path_resnums:
+        try:
+            native_contacts = backend.contact_pairs(
+                backend.prepare_pose(templates["X_I"]), path_resnums, chain=chain)
+        except Exception as exc:
+            raise RuntimeError("cannot build the native transduction network for "
+                               "template_similarity: %s" % exc)
+
     out, failures = {}, {}
     for cid, cand in ctx["candidates"].items():
         # design.propose emits full records; the {resnum: resname} map lives in 'residues'.
@@ -216,6 +251,7 @@ def run(ctx):
             failures[cid] = "incomplete: states not built = %s" % (
                 [s for s, v in tot.items() if v is None])
             continue
+        il_pose = (terms.get("IL") or {}).get("_pose")
         out[cid] = {
             "terms": terms,
             "totals": tot,
@@ -230,9 +266,22 @@ def run(ctx):
             "interface": {st: backend.interface_energy(terms[st]["_pose"])
                           if terms.get(st) and "_pose" in terms[st] else None
                           for st in ("DL", "IL")},
+            # integrity terms rank gates on. Computed here because this is where the packed poses
+            # live; rank refuses to default them (a defaulted strain is +inf and rejects everyone).
+            "clash_count": backend.clash_count(il_pose) if il_pose is not None else None,
+            "ligand_strain": (backend.ligand_internal_energy(il_pose)
+                              if il_pose is not None else None),
+            "template_similarity": (_template_similarity(backend, il_pose, native_contacts,
+                                                         path_resnums, chain)
+                                    if il_pose is not None and native_contacts is not None
+                                    else None),
+            "pose_confidence": pose_conf,
         }
     if not out:
         raise RuntimeError("no candidate produced six buildable states (%d failures). "
                            "First error: %s" % (len(failures),
                                                 next(iter(failures.values()), "none")))
-    return {"candidate_states": out, "state_failures": failures}
+    # publish the backend: specificity scores decoys with the SAME scorefunction and ligand params
+    # as the target, which is the only way S_specificity is a like-for-like difference. It used to
+    # read ctx['backend'], which nothing ever set, so every decoy silently failed to pose.
+    return {"candidate_states": out, "state_failures": failures, "backend": backend}

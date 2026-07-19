@@ -192,6 +192,10 @@ class PyRosettaBackend:
                 out[t] = None
         out["_sfxn"] = self.sfxn_name
         out["_params_hash"] = self.params_hash
+        # keep the scored pose: state_builder reads interface energies and clash counts off it.
+        # Without this the interface terms are silently None and ligand_score has nothing to
+        # cross-check the double difference against.
+        out["_pose"] = pose
         return out
 
     def pose_composition(self, pose):
@@ -234,6 +238,90 @@ class PyRosettaBackend:
                 return j
         raise ValueError("could not identify the ligand jump in the fold tree; refusing to guess "
                          "jump=1, which would measure the wrong interface")
+
+    def score_ligand_pose(self, pose_record, receptor_pdb, resname="LIG"):
+        """Interface energy of ONE placed ligand against a receptor backbone.
+
+        Used for negative design: each decoy is scored with the same function and the same
+        receptor as the target, so S_specificity is a like-for-like comparison rather than two
+        different calculations subtracted.
+        -> float, or None if the complex could not be built.
+        """
+        import os
+        import tempfile
+        from ..pose import write_liganded_state
+        mol = pose_record["mol"] if isinstance(pose_record, dict) else pose_record
+        tmp = os.path.join(tempfile.gettempdir(), "allotf_decoy_%d.pdb" % abs(hash(str(mol))))
+        try:
+            write_liganded_state(receptor_pdb, mol, tmp, resname=resname)
+            p = self.prepare_pose(tmp)
+            return self.interface_energy(p)
+        except Exception:
+            return None
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+    def clash_count(self, pose, per_residue_rep=10.0):
+        """Number of residues whose fa_rep exceeds per_residue_rep.
+
+        A COUNT, not a total: one catastrophic contact can dominate a summed repulsion and make a
+        single bad rotamer look like a globally broken fold, or hide several mild clashes.
+        """
+        from pyrosetta.rosetta.core.scoring import ScoreType
+        self.sfxn(pose)
+        e = pose.energies()
+        n = 0
+        for i in range(1, pose.total_residue() + 1):
+            try:
+                if float(e.residue_total_energies(i)[ScoreType.fa_rep]) > per_residue_rep:
+                    n += 1
+            except Exception:
+                continue
+        return n
+
+    def ligand_internal_energy(self, pose):
+        """Score of the ligand residue(s) alone - the strain proxy for the placed conformer.
+        None when the pose has no ligand (apo and DNA-only states), which is not zero strain."""
+        self.sfxn(pose)
+        e = pose.energies()
+        vals = []
+        for i in range(1, pose.total_residue() + 1):
+            if pose.residue(i).is_ligand():
+                try:
+                    vals.append(float(e.residue_total_energy(i)))
+                except Exception:
+                    pass
+        return sum(vals) if vals else None
+
+    def contact_pairs(self, pose, resnums, chain="A", cutoff=8.0):
+        """-> set of (resnum_i, resnum_j) within cutoff (CB, CA fallback).
+
+        Used to compare a candidate's transduction/output network against the native one: the
+        allosteric path is a network property, so it is compared as a network rather than as a
+        single distance.
+        """
+        import numpy as np
+        xyz = {}
+        for rn in resnums:
+            try:
+                r = pose.residue(self._pose_index(pose, rn, chain))
+            except Exception:
+                continue
+            name = "CB" if r.has("CB") else ("CA" if r.has("CA") else None)
+            if name is None:
+                continue
+            v = r.xyz(name)
+            xyz[rn] = np.array([v.x, v.y, v.z])
+        keys = sorted(xyz)
+        pairs = set()
+        for a in range(len(keys)):
+            for b in range(a + 1, len(keys)):
+                if float(np.linalg.norm(xyz[keys[a]] - xyz[keys[b]])) < cutoff:
+                    pairs.add((keys[a], keys[b]))
+        return pairs
 
     def interface_energy(self, pose, jump=None):
         """E(complex) - E(separated) across the LIGAND jump (auto-detected unless given).

@@ -248,14 +248,90 @@ def generate_on_both(ligand_smiles, x_d, x_i, pocket_residues, n_poses=10, **kw)
     return {"X_D": pd, "X_I": pi, "method": sorted(md)[0] if md else None}
 
 
+def write_liganded_state(receptor_pdb, mol, out_path, resname="LIG", chain="X"):
+    """receptor backbone + the placed TARGET ligand -> one PDB (a DL or IL state).
+
+    Heteroatoms of the receptor are dropped: the native effector must not ride along beside the
+    target. Without these files the liganded states fall back to the native crystal, so DL does not
+    exist at all and IL scores the wrong molecule - the linkage would be about the native ligand.
+    """
+    from rdkit import Chem
+    lig = []
+    for ln in Chem.MolToPDBBlock(mol, flavor=4).splitlines():
+        if not ln.startswith(("ATOM", "HETATM")):
+            continue
+        ln = "HETATM" + ln[6:]
+        ln = ln[:17] + ("%3s" % resname[:3]) + ln[20:]
+        ln = ln[:21] + chain[0] + ln[22:]
+        lig.append(ln)
+    if not lig:
+        raise RuntimeError("pose produced no ligand atoms for %s" % out_path)
+    keep = []
+    with open(receptor_pdb) as f:
+        for ln in f:
+            if ln.startswith(("ATOM", "TER")):
+                keep.append(ln.rstrip("\n"))
+    if not keep:
+        raise RuntimeError("receptor %s has no ATOM records" % receptor_pdb)
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    with open(out_path, "w") as f:
+        f.write("\n".join(keep + lig) + "\nEND\n")
+    return out_path
+
+
+def pose_confidence(poses, rmsd_cut=2.0):
+    """Do independent placements agree on one binding mode?
+
+    -> fraction of poses within rmsd_cut of the best one. A scattered ensemble means the top pose
+    is arbitrary, and every liganded-state energy inherits that arbitrariness - which is exactly
+    what the pose_confidence gate is meant to catch. Returns None when it cannot be assessed
+    (a single pose is not evidence of convergence).
+    """
+    from rdkit.Chem import AllChem, rdMolAlign
+    if not poses or len(poses) < 2:
+        return None
+    ref = poses[0]["mol"]
+    close = 1
+    for p in poses[1:]:
+        try:
+            if rdMolAlign.GetBestRMS(AllChem.RemoveHs(p["mol"]),
+                                     AllChem.RemoveHs(ref)) <= rmsd_cut:
+                close += 1
+        except Exception:
+            continue
+    return close / len(poses)
+
+
 def run(ctx):
-    """requires ctx['states'], ctx['masks']; produces ctx['poses']"""
+    """requires ctx['states'], ctx['masks']; produces ctx['poses'] and updated ctx['states']"""
     st = ctx["states"]
     rt = ctx["route"]
-    poses = generate_on_both(rt["target_smiles"], st["paths"]["X_D"], st["paths"]["X_I"],
+    target_smiles = rt.get("target_smiles") or rt.get("smiles")
+    if not target_smiles:
+        raise RuntimeError("route produced no target SMILES for pose generation")
+    poses = generate_on_both(target_smiles, st["paths"]["X_D"], st["paths"]["X_I"],
                              ctx["masks"]["recognition_mask"],
                              n_poses=ctx["cfg"]["design"].get("n_poses", 10),
                              native_pdb=st["paths"].get("X_I_lig") or st["paths"].get("X_D_lig"),
                              native_resname=st.get("effector_resname"),
                              native_smiles=rt.get("native_smiles"))
-    return {"poses": poses}
+
+    out_dir = os.path.join(ctx["out_dir"], "states")
+    paths = dict(st["paths"])
+    paths["X_I_lig_native"] = paths.get("X_I_lig")     # keep the crystal for reference/controls
+    resname = ctx.get("target_resname", "LIG")
+    conf = {}
+    for key, backbone in (("X_D_lig", "X_D"), ("X_I_lig", "X_I")):
+        ps = poses.get(backbone) or []
+        if not ps:
+            raise RuntimeError("no target pose on %s: the %s state cannot be built" % (backbone, key))
+        paths[key] = write_liganded_state(paths[backbone], ps[0]["mol"],
+                                          os.path.join(out_dir, key + ".pdb"), resname=resname)
+        conf[backbone] = pose_confidence(ps)
+    # one number for the target placement as a whole: the weaker of the two backbones, because a
+    # confident IL beside a scattered DL still makes the double difference unreliable
+    vals = [v for v in conf.values() if v is not None]
+    overall = min(vals) if vals else None
+    return {"poses": dict(poses, confidence=overall, per_backbone_confidence=conf,
+                          target_resname=resname),
+            "states": dict(st, paths=paths)}

@@ -53,6 +53,9 @@ MODE_MAP = {"auto": None, "enhance": "ENHANCEMENT", "retarget": "RETARGETING"}
 DOSE_FRACTIONS = [0.0, 0.1, 0.3, 1.0, 3.0]
 TIME_POINTS = [0, 6, 12, 18, 24, 30, 36]
 REPLICATES = 2
+# (id, replicates). 'empty' is the empty-vector background fluorescence.clean subtracts per (c,t);
+# 'WT' is the native reference. experiment_io recognises both ids.
+CONTROL_WELLS = (("WT", 1), ("empty", 1))
 
 
 def load_yaml(path):
@@ -174,22 +177,36 @@ def _write_fasta(path, candidates):
             f.write(">%s\n%s\n" % (cid, c["sequence"]))
 
 
-def _write_plate_layout(path, cids, conc):
+def _write_plate_layout(path, cids, conc, controls=CONTROL_WELLS):
     """One physical well per (candidate, concentration, replicate); every timepoint is a REPEATED
     READ of that same well. Incrementing the well inside the time loop would demand
-    candidates x doses x times x reps wells (560 for 8 candidates) instead of 80 — the whole point
-    of a time course is that it costs reads, not plasmids or wells."""
+    candidates x doses x times x reps wells (560 for 8 candidates) instead of 80 - the whole point
+    of a time course is that it costs reads, not plasmids or wells.
+
+    The control rows are not optional. 'empty' (empty vector) is the per-(c,t) background that
+    fluorescence subtracts - inducer autofluorescence is dose-dependent and the plate drifts with
+    time, so a plate without it cannot be corrected. 'WT' is the reference the designs are read
+    against. They run at one replicate to keep 8 designs + controls inside one 96-well plate:
+    8x5x2 = 80 design wells + 5 + 5 = 90.
+    """
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["candidate_id", "concentration", "time_h", "replicate", "well"])
+        w.writerow(["candidate_id", "concentration", "time_h", "replicate", "well", "role"])
         well = 0
-        for cid in cids:
+
+        def block(cid, reps, role):
+            nonlocal well
             for c in conc:
-                for rep in range(1, REPLICATES + 1):
+                for rep in range(1, reps + 1):
                     label = "W%04d" % well
                     well += 1
                     for t in TIME_POINTS:
-                        w.writerow([cid, c, t, rep, label])
+                        w.writerow([cid, c, t, rep, label, role])
+
+        for cid in cids:
+            block(cid, REPLICATES, "design")
+        for cid, reps in controls:
+            block(cid, reps, "control")
 
 
 def _write_features(path, rows):

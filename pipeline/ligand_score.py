@@ -59,7 +59,14 @@ def score(states, cfg=None):
     -> dict(state_preference, target_binding, dG_apo, dG_lig, ddG_coupling, terms, agree)
     Fail closed: a missing state yields None, never a zero that reads as "neutral".
     """
-    tot = totals(states) if not isinstance(next(iter(states.values()), None), (int, float)) else states
+    # three accepted shapes, because state_builder emits a SUMMARY record while build_six returns
+    # the raw per-state terms. Handing the summary straight to totals() made it look for
+    # 'total_score' inside 'terms'/'interface' and blow up.
+    if isinstance(states.get("totals"), dict):
+        tot = states["totals"]                                   # summary from state_builder.run
+    else:
+        first = next(iter(states.values()), None)
+        tot = states if isinstance(first, (int, float)) else totals(states)
     link = linkage(tot)
     iface = (states.get("interface") or {}) if isinstance(states, dict) else {}
     e_l_d, e_l_i = iface.get("DL"), iface.get("IL")
@@ -87,5 +94,8 @@ def run(ctx):
     """requires ctx['candidate_states']; produces ctx['ligand_scores']"""
     out = {}
     for cid, st in ctx["candidate_states"].items():
-        out[cid] = score(st, ctx.get("cfg"))
+        # pass the summary's energy views explicitly rather than the whole record: the record also
+        # carries terms/poses, and score() should never have to guess which of them is the energies
+        out[cid] = score({"totals": st.get("totals"), "interface": st.get("interface")},
+                         ctx.get("cfg"))
     return {"ligand_scores": out}
