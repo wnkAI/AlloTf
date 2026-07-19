@@ -86,6 +86,34 @@ NATIVE_REQUIRED = ["dG_apo", "dG_lig", "ddG_coupling", "E_DNA_X_D", "S_release",
                    "clash_count", "template_similarity", "all_states_packed"]
 
 
+# Which gate failure means which FUNCTIONAL CATEGORY. A candidate gets a category, not just a
+# pass/fail - the failure-mode decomposition is itself the methodological contribution, and it maps
+# a reviewer's question ("why did this one fail") onto a mechanism, not a number.
+# Order matters: the first matching gate (structural integrity first, then the mechanism gates)
+# assigns the category, because a clashing pose makes every downstream energy meaningless.
+FAILURE_CATEGORY = [
+    ("structural_failure",   ("packing", "fold_clash", "ligand_strain", "pose_confidence",
+                              "agreement")),
+    ("constitutive_on_risk", ("apo_state_bias",)),
+    ("dna_binding_defective", ("apo_dna_competence",)),
+    ("binding_only_nonresponder", ("target_binding", "coupling", "ligand_prefers_induced",
+                                   "dna_release", "allosteric_template")),
+    ("decoy_preferring",     ("specificity",)),
+]
+
+
+def classify_candidate(passed, reasons):
+    """-> functional category. 'functional_switch' iff it passed everything; otherwise the category
+    of the FIRST gate it failed, in the priority order above (structure before mechanism)."""
+    if passed:
+        return "functional_switch"
+    fired = {r.split(":", 1)[0] for r in reasons}
+    for category, gates in FAILURE_CATEGORY:
+        if fired & set(gates):
+            return category
+    return "rejected_other"
+
+
 def apply_gates(f, cfg, control_metrics, topology_mode="auto", route_direction=None,
                 only_gates=None, required=None):
     """-> (passed: bool, reasons: list[str]). Fail closed on any missing feature.
@@ -415,9 +443,13 @@ def run(ctx):
     validation_level = report.get("validation_level")
 
     kept, rejected = [], []
+    category_counts = {}
     for c in features:
         passed, reasons = apply_gates(c, cfg, control_metrics, topo, direction)
-        (kept if passed else rejected).append(dict(c, _reasons=reasons))
+        category = classify_candidate(passed, reasons)
+        category_counts[category] = category_counts.get(category, 0) + 1
+        rec = dict(c, _reasons=reasons, functional_category=category)
+        (kept if passed else rejected).append(rec)
 
     objectives = cfg["pareto"]["objectives"]
     maximize = cfg["pareto"].get("maximize", {})
@@ -443,7 +475,7 @@ def run(ctx):
     csv_path = os.path.join(out_dir, "ranked_candidates.csv")
     # validation_level travels WITH every ranked row: a reader must see on what evidence this
     # scaffold was calibrated. It is not an objective and never enters the Pareto score.
-    cols = ["id", "sequence"] + REQUIRED + ["validation_level", "_reasons"]
+    cols = ["id", "sequence", "functional_category"] + REQUIRED + ["validation_level", "_reasons"]
     with open(csv_path, "w", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         wr.writeheader()
@@ -456,9 +488,22 @@ def run(ctx):
         for c in final:
             f.write(">%s\n%s\n" % (c.get("id", "cand"), c.get("sequence", "")))
 
+    # failure-mode decomposition of the whole pool: every candidate has a category, not just the
+    # survivors. A deliverable, not a log line.
+    import json as _json
+    by_cat = {}
+    for r in rejected:
+        by_cat.setdefault(r.get("functional_category"), []).append(r.get("id"))
+    fm_path = os.path.join(out_dir, "failure_modes.json")
+    with open(fm_path, "w") as f:
+        _json.dump({"n_total": len(features), "n_functional_switch": len(kept),
+                    "category_counts": category_counts, "rejected_by_category": by_cat},
+                   f, indent=2)
+
     return {"ranked": {"front": front, "final": final, "rejected": len(rejected),
                        "n_in": len(features), "n_passed": len(kept),
-                       "csv": csv_path, "fasta": fasta_path,
+                       "csv": csv_path, "fasta": fasta_path, "failure_modes": fm_path,
+                       "category_counts": category_counts,
                        "diversity_shortfall": max(0, n_final - len(final)),
                        # evidence level of the calibration behind this ranking
                        "validation_level": validation_level,
