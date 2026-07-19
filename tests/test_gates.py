@@ -27,6 +27,13 @@ CTRL = {
         # scaffold lacking such a mutant - contradicting negative controls being optional.
         "template_similarity": {"value": 1.0, "sigma": 0.12},
     },
+    # WT protein + the NEW TARGET. This, not the native effector, is what a candidate's binding
+    # and selectivity are measured against: interface energy moves with molecule size, charge and
+    # atom count, so comparing a new molecule's E_L_I to tetracycline's compares two chemistries.
+    "wt_target": {
+        "E_L_I":         {"value": -3.5, "sigma": 0.5},   # WT already binds the target somewhat
+        "S_specificity": {"value":  0.0, "sigma": 0.4},   # undesigned WT is not yet selective
+    },
     # Negative controls are optional in availability, mandatory in behaviour when declared.
     # They VERIFY the ruler separates broken variants; they no longer DEFINE any threshold.
     "known_constitutive": {"dG_apo": {"value": -1.0, "sigma": 0.5}},

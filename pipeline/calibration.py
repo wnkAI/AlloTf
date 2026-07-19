@@ -8,13 +8,15 @@ produces:
     control_metrics  {control: {metric: {value, sigma, n, ...}}} - the NUMBERS thresholds resolve
                                                                   against
 
-WT is mandatory (wt_apo, wt_native_holo). Declared negative controls are scored when the scaffold
+WT is mandatory (wt_apo, wt_target, wt_native_holo). Declared negative controls are scored when the scaffold
 config names their mutations; absent ones are simply not produced, and rank records the resulting
 validation level. That policy lives in rank.check_controls - this stage only measures.
 
-sigma is not decoration. It is the spread over independent repeats: structure pairs, poses and
-protonation states, exactly the robustness axes scoring.yaml declares. A sigma taken from one
-calculation would make every threshold a hair's breadth from its control value.
+sigma is not decoration - a sigma from one calculation would collapse every "control +/- k*sigma"
+threshold onto the control value itself. Today it is the spread over independent STRUCTURE PAIRS
+only. Per-pose and per-protonation rescoring are not implemented, so scoring.yaml keeps their
+minima at 1 and the report states what was actually varied; raising the config without
+implementing the rescoring would claim a robustness the numbers never had.
 """
 import os
 
@@ -52,6 +54,64 @@ def _replicate_templates(paths, n_structure_pairs):
         merged.update(alt)
         reps.append(merged)
     return reps
+
+
+def _build_native_liganded_states(ctx, backend, templates, pocket, out_subdir="states"):
+    """Native effector placed on BOTH backbones, written with the bundle's own resname.
+
+    Two things forbid reusing the deposited crystal here:
+
+      * There is no crystal of the native effector on the DNA-COMPATIBLE backbone. Falling back to
+        the induced-state crystal for D_L makes (E_IL - E_DL) a comparison of one structure with
+        itself, and the native positive control's linkage becomes meaningless.
+      * The crystal carries its deposited residue name (TET, QUE, ...), while the backend was
+        initialised with the parameter bundle, where the native effector is a decoy with its own
+        resname (D01). Rosetta would be reading a residue it has no params for.
+
+    So the crystal ligand is used only as a COORDINATE TEMPLATE - MCS transfer onto each backbone -
+    and both states are rewritten under the bundle's native resname.
+    """
+    import os
+    from . import pose as pose_mod
+
+    rt = ctx.get("route") or {}
+    lp = ctx.get("ligand_params") or {}
+    native_smiles = rt.get("native_smiles")
+    if not native_smiles:
+        raise RuntimeError(
+            "no native_smiles: wt_native_holo is the scaffold's own switch and cannot be built "
+            "without the native effector's chemistry.")
+
+    native_entry = None
+    for did, d in (lp.get("decoys") or {}).items():
+        if (d.get("decoy_name") or d.get("role")) == "native_effector":
+            native_entry = d
+            break
+    if native_entry is None:
+        raise RuntimeError(
+            "the native effector is not in the ligand_params bundle: the native control would be "
+            "scored with a residue the backend has no params for.")
+    resname = native_entry["resname"]
+
+    crystal = templates.get("X_I_lig_native")
+    out_dir = os.path.join(ctx.get("out_dir", "."), out_subdir)
+    os.makedirs(out_dir, exist_ok=True)
+
+    built = dict(templates)
+    for key, backbone in (("X_D_lig", "X_D"), ("X_I_lig", "X_I")):
+        ps = pose_mod.generate_poses(
+            native_smiles, templates[backbone], pocket,
+            n_poses=(ctx.get("cfg", {}).get("design") or {}).get("n_poses", 10),
+            native_pdb=crystal, native_resname=ctx["states"].get("effector_resname"),
+            native_smiles=native_smiles)
+        if not ps:
+            raise RuntimeError("could not place the native effector on %s: the native control "
+                               "cannot be built, so this scaffold is not calibratable" % backbone)
+        path = os.path.join(out_dir, "%s_native.pdb" % key)
+        pose_mod.write_liganded_state(templates[backbone], ps[0]["mol"], path,
+                                      resname=resname, conf_id=ps[0].get("conf_id", -1))
+        built[key] = path
+    return built
 
 
 def _score_one(backend, residues, templates, design_positions, second_shell, chain,
@@ -181,20 +241,14 @@ def run(ctx):
     # effector (the crystal pose kept as X_I_lig_native), not with the design target. Scoring both
     # on the target would put target-ligand numbers into thresholds labelled "native holo", and
     # every gate anchored on wt_native_holo would then be calibrated against the wrong molecule.
-    native_templates = dict(templates)
-    native_lig = templates.get("X_I_lig_native")
-    if native_lig:
-        native_templates["X_I_lig"] = native_lig
-        # the native effector's DL state has no crystal either; without one the native-holo control
-        # cannot be built as a full six-state record
-        native_templates["X_D_lig"] = templates.get("X_D_lig_native") or native_lig
-    else:
-        raise RuntimeError(
-            "no X_I_lig_native: wt_native_holo must be scored with the scaffold's NATIVE effector. "
-            "pose.run keeps the native crystal under that key - run it before calibration.")
+    native_templates = _build_native_liganded_states(ctx, backend, templates, design_positions)
 
     controls_spec = {
-        "wt_apo": (wt, templates),                    # target-liganded states; apo metrics used
+        # WT on the TARGET-liganded states. wt_apo supplies the apo/DNA baseline; wt_target is the
+        # same calculation read as "what does this scaffold do with the new molecule before any
+        # design" - the only fair reference for a candidate's target binding and selectivity.
+        "wt_apo": (wt, templates),
+        "wt_target": (wt, templates),
         "wt_native_holo": (wt, native_templates),     # NATIVE effector - the real positive control
     }
     # declared negative controls, if the scaffold config names their mutations
@@ -224,6 +278,19 @@ def run(ctx):
         control_scores[cname] = rows[0]
         per_control_reps[cname] = len(rows)
 
+        # require_consistent_sign, actually enforced. A control whose ddG_coupling or S_release
+        # flips sign between independent structure pairs is not a stable reference: every gate
+        # written against it would move with the choice of crystal.
+        if robust.get("require_consistent_sign", False) and len(rows) > 1:
+            for metric in ("ddG_coupling", "S_release"):
+                vals = [r.get(metric) for r in rows if r.get(metric) is not None]
+                signs = {(v > 0) - (v < 0) for v in vals}
+                if len(signs) > 1:
+                    raise RuntimeError(
+                        "control %s has an inconsistent %s across structure pairs (%s): the sign "
+                        "depends on which crystal was used, so it cannot anchor a gate."
+                        % (cname, metric, ["%.3f" % v for v in vals]))
+
         metrics = {}
         for metric, get in METRIC_SOURCES.items():
             vals = [get(r) for r in rows]
@@ -236,8 +303,10 @@ def run(ctx):
             metrics[metric] = {"value": float(np.mean(vals)), "sigma": sigma, "n": len(vals)}
         control_metrics[cname] = metrics
 
-    achieved = {"structure_pairs": len(replicates),
-                "poses": len((ctx.get("poses") or {}).get("X_I") or []),
+    # Report what was actually VARIED, not what was generated. Counting every generated pose here
+    # claimed a pose-robustness the sigma never contained: only the top pose is scored.
+    achieved = {"structure_pairs": max(per_control_reps.values()) if per_control_reps else 0,
+                "poses": 1,                 # only the top pose enters the six states today
                 "protonation_states": 1}
     required = {"structure_pairs": int(robust.get("min_structure_pairs", 1) or 1),
                 "poses": int(robust.get("min_poses", 1) or 1),

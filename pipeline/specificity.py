@@ -79,7 +79,7 @@ def decoy_tier(name):
 # selectivity - it only answers "which molecules are the dangerous chemical neighbours worth
 # comparing against". Selectivity itself is decided by structure-based scoring on the same
 # candidate protein.
-W_ECFP, W_MCS, W_PHARM = 0.60, 0.25, 0.15
+W_ECFP, W_MCS, W_FEAT = 0.60, 0.25, 0.15
 MIN_ECFP, MIN_MCS = 0.35, 0.50          # pre-filter: either route into "close enough to matter"
 # ...but neither metric alone may carry a molecule through. Measured on tetracycline, a
 # cholesterol-CoA derivative passed on MCS=0.50 with ECFP=0.09: a large molecule can accumulate
@@ -116,11 +116,15 @@ def _mcs_similarity(a, b, timeout=5):
     return float(2 * res.numAtoms) / float(na + nb)
 
 
-def _pharmacophore_similarity(a, b):
-    """Overlap of functional features: donors, acceptors, aromatic rings, +/- centres, hydrophobes.
+def _functional_feature_count_similarity(a, b):
+    """COUNT overlap of functional features: donors, acceptors, aromatic ATOMS, +/- centres,
+    hydrophobic carbons.
 
-    Guards the failure ECFP and MCS share - a carbon skeleton that looks similar while the groups
-    that actually make the interactions are different.
+    Named for what it does. This is NOT a pharmacophore: it compares how MANY of each feature the
+    two molecules have, not their 3D distances, spatial arrangement, ring positions or topological
+    relationships - and "aromatic" here counts atoms, not rings. It is a 15% auxiliary term that
+    guards one specific failure of ECFP and MCS (a similar carbon skeleton whose interacting groups
+    differ); ECFP and MCS carry the actual selection.
     """
     from rdkit import Chem
     feats = {
@@ -143,7 +147,7 @@ def _pharmacophore_similarity(a, b):
 
 
 def graph_similarity(a, b):
-    """-> (combined, {'ecfp','mcs','pharm'}). Combined = 0.60*ECFP + 0.25*MCS + 0.15*pharmacophore.
+    """-> (combined, {'ecfp','mcs','pharm'}). Combined = 0.60*ECFP + 0.25*MCS + 0.15*feature-count.
 
     Three complementary views, because each alone misleads: ECFP is size-sensitive and over-
     penalises substitutions on a shared core; MCS can score two molecules with very different
@@ -151,11 +155,63 @@ def graph_similarity(a, b):
     """
     e = _ecfp_similarity(a, b)
     m = _mcs_similarity(a, b)
-    p = _pharmacophore_similarity(a, b)
-    return W_ECFP * e + W_MCS * m + W_PHARM * p, {"ecfp": e, "mcs": m, "pharm": p}
+    p = _functional_feature_count_similarity(a, b)
+    return W_ECFP * e + W_MCS * m + W_FEAT * p, {"ecfp": e, "mcs": m, "feat": p}
 
 
-def close_analogues(target_smiles, n=4, db_path=None):
+def _load_analogue_library(db_path):
+    """-> [(label, smiles)] from an .sdf or a .csv with a smiles column.
+
+    Priority is decided by the caller: a TARGET-SPECIFIC library the user supplied beats a
+    project-maintained one, which beats atf_ligand_db.csv. That last one is a fallback, not a
+    source of analogues - it is a catalogue of NATIVE aTF EFFECTORS, so for tetracycline it holds
+    exactly one tetracycline and no doxycycline or minocycline. Each target deserves an explicit,
+    auditable challenge set rather than whatever the effector catalogue happens to contain.
+    """
+    import csv
+    import os
+    from rdkit import Chem
+
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(db_path)
+    out = []
+    if db_path.lower().endswith((".sdf", ".mol")):
+        for i, m in enumerate(Chem.SDMolSupplier(db_path)):
+            if m is None:
+                continue
+            label = (m.GetProp("_Name") if m.HasProp("_Name") else "") or "lib_%d" % (i + 1)
+            out.append((label.strip().replace(" ", "_"), Chem.MolToSmiles(m)))
+        return out
+    with open(db_path) as f:
+        for row in csv.DictReader(f):
+            smi = (row.get("smiles") or row.get("SMILES") or "").strip()
+            if not smi:
+                continue
+            label = (row.get("name") or row.get("ligand") or row.get("native_ligand")
+                     or smi[:12]).strip().replace(" ", "_")
+            out.append((label, smi))
+    return out
+
+
+def analogue_library_path(cfg=None, root=None):
+    """User-supplied target library > project library > native-effector catalogue (fallback)."""
+    import os
+    root = root or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    user = (cfg or {}).get("analogue_library")
+    if user:
+        if not os.path.exists(user):
+            raise FileNotFoundError(
+                "specificity.analogue_library points at %s, which does not exist. A declared "
+                "challenge set that silently falls back would produce a specificity number "
+                "computed against the wrong molecules." % user)
+        return user, "user_target_library"
+    project = os.path.join(root, "data", "target_analogues.sdf")
+    if os.path.exists(project):
+        return project, "project_library"
+    return os.path.join(root, "data", "atf_ligand_db.csv"), "native_effector_catalogue_fallback"
+
+
+def close_analogues(target_smiles, n=4, db_path=None, cfg=None):
     """The n most dangerous chemical neighbours of the target in the aTF ligand database.
 
     Pre-filtered on ECFP >= 0.35 OR MCS >= 0.50 (either route into "close enough to matter"), then
@@ -165,7 +221,6 @@ def close_analogues(target_smiles, n=4, db_path=None):
     This selects WHAT to compare. It never decides selectivity, which is measured by docking and
     scoring each of these on the same candidate protein as the target.
     """
-    import csv
     import os
     from rdkit import Chem
 
@@ -173,40 +228,37 @@ def close_analogues(target_smiles, n=4, db_path=None):
     if t is None:
         raise ValueError("target SMILES could not be parsed for analogue selection: %s"
                          % target_smiles)
-    db_path = db_path or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                      "data", "atf_ligand_db.csv")
-    if not os.path.exists(db_path):
-        raise FileNotFoundError(
-            "ligand database %s not found: close analogues are a MANDATORY decoy tier and cannot "
-            "be silently skipped" % db_path)
+    if db_path is None:
+        db_path, source = analogue_library_path(cfg)
+    else:
+        source = "explicit"
+    library = _load_analogue_library(db_path)
 
     from utils.standardize_ligand import same_molecule
     scored = []
-    with open(db_path) as f:
-        for row in csv.DictReader(f):
-            smi = (row.get("smiles") or "").strip()
-            if not smi:
+    for label, smi in library:
+        m = Chem.MolFromSmiles(smi)
+        if m is None:
+            continue
+        try:
+            if same_molecule(smi, target_smiles):          # salt / solvate / protonation variant
                 continue
-            m = Chem.MolFromSmiles(smi)
-            if m is None:
+        except Exception:
+            if smi == target_smiles:
                 continue
-            try:
-                if same_molecule(smi, target_smiles):      # salt / solvate / protonation variant
-                    continue
-            except Exception:
-                if smi == target_smiles:
-                    continue
-            combined, parts = graph_similarity(t, m)
-            if (parts["ecfp"] < MIN_ECFP and parts["mcs"] < MIN_MCS) or combined < MIN_COMBINED:
-                continue
-            # the column is native_ligand in atf_ligand_db.csv; reading a non-existent 'ligand'
-            # column silently degraded every analogue name to a SMILES fragment
-            label = (row.get("native_ligand") or row.get("ligand") or row.get("name")
-                     or smi[:12]).strip().replace(" ", "_")
-            scored.append((combined, label, smi, parts))
+        combined, parts = graph_similarity(t, m)
+        if (parts["ecfp"] < MIN_ECFP and parts["mcs"] < MIN_MCS) or combined < MIN_COMBINED:
+            continue
+        scored.append((combined, label, smi, parts))
     scored.sort(key=lambda x: -x[0])
-    return [("analogue_%d_%s" % (i + 1, name), smi)
-            for i, (c, name, smi, parts) in enumerate(scored[:n])]
+    picked = [("analogue_%d_%s" % (i + 1, name), smi)
+              for i, (c, name, smi, parts) in enumerate(scored[:n])]
+    if not picked and source == "native_effector_catalogue_fallback":
+        # say it out loud: the fallback is a catalogue of native effectors, not an analogue set
+        print("  [specificity] no close analogue found in %s (%s). The mandatory tier is then "
+              "native effector + stereoisomers only. Supply specificity.analogue_library with a "
+              "target-specific challenge set to strengthen it." % (os.path.basename(db_path), source))
+    return picked
 
 
 def default_decoys(target_smiles, native_smiles=None, extra=(), include_metabolites=False):

@@ -74,7 +74,20 @@ def release_sign(topology_mode, route_direction=None):
     return +1
 
 
-def apply_gates(f, cfg, control_metrics, topology_mode="auto", route_direction=None):
+# Gates that ask "does this protein switch on ITS OWN native effector". The native positive control
+# is judged on these ONLY: it is not being retargeted, so demanding that it bind the new target
+# well (target_binding), out-compete the target's decoys (specificity), or inherit the target's
+# pose confidence would fail a perfectly good scaffold for the wrong reason.
+NATIVE_SWITCH_GATES = ("apo_state_bias", "coupling", "ligand_prefers_induced",
+                       "apo_dna_competence", "dna_release", "allosteric_template",
+                       "fold_clash", "ligand_strain", "packing", "agreement")
+# fields a native-switch row is required to carry (the target-specific ones are not its business)
+NATIVE_REQUIRED = ["dG_apo", "dG_lig", "ddG_coupling", "E_DNA_X_D", "S_release",
+                   "clash_count", "template_similarity", "all_states_packed"]
+
+
+def apply_gates(f, cfg, control_metrics, topology_mode="auto", route_direction=None,
+                only_gates=None, required=None):
     """-> (passed: bool, reasons: list[str]). Fail closed on any missing feature.
 
     Every reason STARTS WITH ITS GATE NAME ("apo_state_bias: ..."). check_controls relies on that
@@ -87,54 +100,67 @@ def apply_gates(f, cfg, control_metrics, topology_mode="auto", route_direction=N
     """
     g = cfg["hard_gates"]
     bad = []
+    want = set(only_gates) if only_gates else None
+
+    def fires(gate):
+        """Is this gate in scope for the object being judged?"""
+        return want is None or gate in want
 
     if cfg.get("fail_closed", True):
-        missing = [k for k in REQUIRED if k not in f or f[k] is None]
+        need = required if required is not None else REQUIRED
+        missing = [k for k in need if k not in f or f[k] is None]
         if missing:
             return False, ["missing:" + ",".join(missing)]
-    if not f.get("all_states_packed", False):
+    if fires("packing") and not f.get("all_states_packed", False):
         bad.append("packing: a state failed to pack")
 
     T = lambda e, metric: resolve_threshold(e, control_metrics, metric)
 
-    if f["E_L_I"] > T(g["target_binding"]["max"], "E_L_I"):
+    if fires("target_binding") and f["E_L_I"] > T(g["target_binding"]["max"], "E_L_I"):
         bad.append("target_binding: target does not bind (E_L_I above WT native effector)")
-    if f["dG_apo"] < T(g["apo_state_bias"]["min"], "dG_apo"):
+    if fires("apo_state_bias") and f["dG_apo"] < T(g["apo_state_bias"]["min"], "dG_apo"):
         bad.append("apo_state_bias: constitutive - apo already prefers the induced state")
-    if f["ddG_coupling"] > T(g["coupling"]["max"], "ddG_coupling"):
+    if fires("coupling") and f["ddG_coupling"] > T(g["coupling"]["max"], "ddG_coupling"):
         bad.append("coupling: ligand does not shift the state population (weak linkage)")
-    if "ligand_prefers_induced" in g and \
+    if fires("ligand_prefers_induced") and "ligand_prefers_induced" in g and \
             f["dG_lig"] > T(g["ligand_prefers_induced"]["max"], "dG_lig"):
         bad.append("ligand_prefers_induced: holo protein still prefers D - ddG_coupling was bought "
                    "by apo bias, not a switch")
-    if f["E_DNA_X_D"] > T(g["apo_dna_competence"]["max"], "E_DNA_X_D"):
+    if fires("apo_dna_competence") and f["E_DNA_X_D"] > T(g["apo_dna_competence"]["max"], "E_DNA_X_D"):
         bad.append("apo_dna_competence: apo can no longer hold the operator")
 
     s = release_sign(topology_mode, route_direction)
-    if s * f["S_release"] < T(g["dna_release"]["min"], "S_release"):
+    if fires("dna_release") and s * f["S_release"] < T(g["dna_release"]["min"], "S_release"):
         bad.append("dna_release: induced state does not release DNA (sign-corrected)")
 
-    if f["S_specificity"] < T(g["specificity"]["min"], "S_specificity"):
+    if fires("specificity") and f["S_specificity"] < T(g["specificity"]["min"], "S_specificity"):
         bad.append("specificity: not selective against decoys")
     # No host-metabolite gate on purpose. A charged metabolite's Rosetta energy is not comparable
     # to a hydrophobic effector's, so the difference cannot carry a pass/fail decision, and a
     # docking failure means the pose method does not apply rather than that the molecule is
     # excluded. Cellular mis-activation is measured where it is measurable: basal leak in the
     # fluorescence assay. metabolite_margin is carried in the report for inspection only.
-    if f["clash_count"] > T(g["state_integrity"]["fold_clash"]["max"], "clash_count"):
+    if fires("fold_clash") and f["clash_count"] > T(g["state_integrity"]["fold_clash"]["max"], "clash_count"):
         bad.append("fold_clash: fold clashes above WT")
-    if f.get("ligand_strain", 1e9) > g["state_integrity"]["ligand_strain"]["max"]:
-        bad.append("ligand_strain: ligand strained")
+    # dict.get(key, default) returns None when the key EXISTS and holds None, so an explicitly
+    # unassessed value slips past the default and reaches the comparison. Unassessed is not a pass:
+    # it is missing evidence, and it fails closed.
+    if fires("ligand_strain"):
+        strain = f.get("ligand_strain")
+        if strain is None or strain > g["state_integrity"]["ligand_strain"]["max"]:
+            bad.append("ligand_strain: ligand strained or strain not assessed")
     # S_state (interface) and ddG_coup (double difference) are the same claim measured two ways.
     # ligand_score.consistency() flags when they disagree; a disagreement means the pose moved
     # during packing, so the candidate is rejected rather than averaged (GPT-5.6 caught this being
     # computed and then ignored). Only enforced when the field is present.
-    if "agree" in f and f["agree"] is False:
+    if fires("agreement") and "agree" in f and f["agree"] is False:
         bad.append("agreement: S_state and ddG_coupling disagree - unstable pose, not a "
                    "trustworthy switch")
-    if f.get("pose_confidence", -1) < g["state_integrity"]["pose_confidence"]["min"]:
-        bad.append("pose_confidence: low pose confidence")
-    if f["template_similarity"] < T(g["allosteric_template"]["min"], "template_similarity"):
+    if fires("pose_confidence"):
+        pc = f.get("pose_confidence")
+        if pc is None or pc < g["state_integrity"]["pose_confidence"]["min"]:
+            bad.append("pose_confidence: low or unassessed pose confidence")
+    if fires("allosteric_template") and f["template_similarity"] < T(g["allosteric_template"]["min"], "template_similarity"):
         bad.append("allosteric_template: allosteric path broken (below the WT template scale)")
 
     return (len(bad) == 0), bad
@@ -173,10 +199,15 @@ def check_controls(control_scores, cfg, control_metrics, topology_mode="auto",
 
     report = {"mandatory": {}, "optional": {}, "optional_missing": []}
 
-    # the scaffold must reproduce its own native switch
+    # The scaffold must reproduce its own native switch - and ONLY that. wt_native_holo is scored
+    # with the NATIVE effector, so judging it on target_binding, specificity or the target's pose
+    # confidence would fail a perfectly good scaffold for not being pre-adapted to a molecule it
+    # has never seen. Those questions belong to the candidates.
     passed, reasons = apply_gates(control_scores["wt_native_holo"], cfg, control_metrics,
-                                  topology_mode, route_direction)
-    report["mandatory"]["wt_native_holo"] = {"passed": passed, "reasons": reasons}
+                                  topology_mode, route_direction,
+                                  only_gates=NATIVE_SWITCH_GATES, required=NATIVE_REQUIRED)
+    report["mandatory"]["wt_native_holo"] = {"passed": passed, "reasons": reasons,
+                                             "gates_applied": list(NATIVE_SWITCH_GATES)}
     if not passed:
         report["verdict"] = ("scaffold rejected: its native ligand + WT system does not reproduce "
                              "a functional switch, so the gates cannot be trusted here")

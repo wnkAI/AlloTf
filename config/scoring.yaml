@@ -16,9 +16,16 @@ calibration:
   required: true               # never false - see above
   margin_sigma: 1.0            # gate fires at: control_value +/- margin_sigma * sigma(control)
 
-  mandatory_controls:          # missing either of these -> scaffold rejected
-    - wt_apo                   # metric baseline, the "not constitutive" reference
-    - wt_native_holo           # the scaffold's own working switch; must reproduce its direction
+  mandatory_controls:          # missing any of these -> scaffold rejected
+    - wt_apo                   # WT, no ligand: the apo / DNA baseline
+    - wt_target                # WT protein + the NEW TARGET: the baseline a candidate's binding
+                               # and selectivity are judged against. Comparing a candidate's
+                               # E_L_I to the NATIVE effector's would compare two different
+                               # molecules - size, charge and atom count move Rosetta interface
+                               # energy on their own.
+    - wt_native_holo           # WT + its NATIVE effector: the scaffold's own working switch.
+                               # Judged only on the switch gates (see rank.NATIVE_SWITCH_GATES) -
+                               # it is not being retargeted and owes the target nothing.
 
   optional_validation_controls:   # each names the gate that MUST be the one to catch it
     known_constitutive:
@@ -39,10 +46,15 @@ calibration:
   require_all_declared_optional: true   # declared but not caught by its gate -> STOP
 
   robustness:                  # sign+margin must survive all of these before a candidate is trusted
-    min_structure_pairs: 2     # independent experimental X_D / X_I pairs
-    min_poses: 3               # independent target poses
-    min_protonation_states: 2  # protonation / tautomer variants of the target
-    require_consistent_sign: true
+    # These must match what the code ACTUALLY varies, or the config claims a robustness the
+    # pipeline never computed. Today sigma comes from independent structure pairs only; per-pose
+    # and per-protonation rescoring are not implemented, so their minima stay at 1 and will be
+    # raised when they are.
+    min_structure_pairs: 2     # independent experimental X_D / X_I pairs - the real sigma source
+    min_poses: 1               # NOT yet a sigma axis: only the top pose is scored
+    min_protonation_states: 1  # NOT yet a sigma axis: one protonation state is used
+    require_consistent_sign: true   # enforced: ddG_coupling and S_release must not flip sign
+                                    # across replicates, or the control is not a stable reference
 
 # ---------------------------------------------------------------------------
 # Regulatory topology. Do NOT hard-code the release sign: corepressors (PurR) invert it -
@@ -59,8 +71,11 @@ hard_gates:
   # 1. binding must actually happen. Without this, a non-binder (+100 vs +99) passes on
   #    state preference alone.
   target_binding:
+    # anchored on WT + THE TARGET, not on the native effector: interface energy scales with
+    # molecule size, charge and atom count, so "binds worse than tetracycline" says nothing about
+    # whether a candidate binds the new molecule well.
     metric: E_L_I
-    max: "wt_native_holo + 1.0*sigma"
+    max: "wt_target + 1.0*sigma"
 
   # 2. NOT constitutive. THE fatal omission of the first draft: without an apo-bias gate a mutant
   #    that already prefers X_I with no ligand passes everything else.
