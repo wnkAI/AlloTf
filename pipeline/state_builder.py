@@ -187,8 +187,15 @@ def run(ctx):
         raise RuntimeError("production multistate scoring requires repacking_backend: pyrosetta; "
                            "our scoring.py is a geometry prefilter only (its optimum is poly-Gly)")
     from .physallo.rosetta_backend import PyRosettaBackend
+    # the bundle is a DICT; the backend wants a LIST OF .params PATHS. Passing the bundle would
+    # make list(...) yield its key names ('target', 'decoys', ...) and Rosetta would be handed
+    # those as -extra_res_fa files.
+    lp = ctx.get("ligand_params")
+    if not lp or not lp.get("all_params"):
+        raise RuntimeError("no ligand_params bundle: the six states cannot read the target ligand "
+                           "without its .params. Run the ligand_params stage first.")
     backend = PyRosettaBackend(score_function=cfg.get("score_function", "ref2015"),
-                               ligand_params=ctx.get("ligand_params"))
+                               ligand_params=lp["all_params"])
 
     templates = ctx["states"]["paths"]
     design_positions = ctx["masks"]["recognition_mask"]
@@ -252,6 +259,18 @@ def run(ctx):
                 [s for s, v in tot.items() if v is None])
             continue
         il_pose = (terms.get("IL") or {}).get("_pose")
+        # every state is checked for clashes; only the liganded ones can carry ligand strain
+        clash_by_state = {st: backend.clash_count(terms[st]["_pose"])
+                          for st in STATES
+                          if terms.get(st) and terms[st].get("_pose") is not None}
+        strain_by_state = {}
+        for st in ("DL", "IL"):
+            p = (terms.get(st) or {}).get("_pose")
+            if p is None:
+                continue
+            v = backend.ligand_strain(p)
+            if v is not None:
+                strain_by_state[st] = v
         out[cid] = {
             "terms": terms,
             "totals": tot,
@@ -268,9 +287,14 @@ def run(ctx):
                           for st in ("DL", "IL")},
             # integrity terms rank gates on. Computed here because this is where the packed poses
             # live; rank refuses to default them (a defaulted strain is +inf and rejects everyone).
-            "clash_count": backend.clash_count(il_pose) if il_pose is not None else None,
-            "ligand_strain": (backend.ligand_internal_energy(il_pose)
-                              if il_pose is not None else None),
+            # Clash is the WORST of the six states, not IL's: a candidate can pack cleanly with the
+            # ligand and still be wrecked in D_DNA, and gating on IL alone would pass it.
+            "clash_count": (max(clash_by_state.values()) if clash_by_state else None),
+            "clash_by_state": clash_by_state,
+            # strain likewise from BOTH liganded states - the DNA-compatible backbone is the
+            # strained one by construction, so measuring only IL misses the cost we care about
+            "ligand_strain": (max(strain_by_state.values()) if strain_by_state else None),
+            "strain_by_state": strain_by_state,
             "template_similarity": (_template_similarity(backend, il_pose, native_contacts,
                                                          path_resnums, chain)
                                     if il_pose is not None and native_contacts is not None

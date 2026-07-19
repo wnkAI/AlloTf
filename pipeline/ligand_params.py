@@ -132,6 +132,85 @@ def assert_same_params(metas):
     return True
 
 
+def run(ctx):
+    """requires ctx['poses'], ctx['states'], ctx['route'];  produces ctx['ligand_params']
+
+    A separate stage on purpose: .params is a chemical preparation step with its own formal charge,
+    stereochemistry, atom names and hash to record, and the six PyRosetta states AND specificity
+    must all read the SAME parameter set. Every decoy gets its OWN resname and .params - they are
+    different molecules, and reusing the target's parameters for a different atom topology is not
+    a thing that can work.
+
+    -> {'target': {...}, 'decoys': {id: {...}}, 'all_params': [paths], 'bundle_hash': str}
+    """
+    import hashlib
+
+    rt = ctx["route"]
+    out_dir = os.path.join(ctx["out_dir"], "ligand_params")
+    os.makedirs(out_dir, exist_ok=True)
+
+    target_smiles = rt.get("target_smiles") or rt.get("smiles")
+    if not target_smiles:
+        raise RuntimeError("route produced no target SMILES to parameterise")
+
+    poses = ctx.get("poses") or {}
+    target_resname = poses.get("target_resname", "TGT")
+
+    target = _parameterise(target_smiles, out_dir, target_resname, "target")
+
+    # decoys: same decoy set specificity will score, parameterised here so both stages agree
+    from .specificity import default_decoys
+    preserve = ctx.get("cfg", {}).get("objective", {}).get("preserve_native_response", False)
+    native = None if preserve else rt.get("native_smiles")
+    decoys = {}
+    for i, smi in enumerate(default_decoys(target_smiles, native) or []):
+        if not smi or smi == target_smiles:
+            continue
+        did = "D%02d" % (i + 1)
+        resname = "D%02d" % (i + 1)
+        try:
+            decoys[did] = _parameterise(smi, out_dir, resname,
+                                        "native_effector" if smi == native else "decoy_%d" % (i + 1))
+        except Exception as exc:
+            raise RuntimeError("decoy %s (%s) could not be parameterised: %s. A decoy without its "
+                               "own params cannot be scored against the target." % (did, smi, exc))
+
+    all_params = [target["params"]] + [d["params"] for d in decoys.values()]
+    bundle_hash = hashlib.sha1("|".join(sorted(_sha1(p) for p in all_params)).encode()).hexdigest()[:12]
+    bundle = {"target": target, "decoys": decoys, "all_params": all_params,
+              "bundle_hash": bundle_hash}
+    with open(os.path.join(out_dir, "bundle.json"), "w") as f:
+        json.dump(bundle, f, indent=2)
+    return {"ligand_params": bundle}
+
+
+def _parameterise(smiles, out_dir, resname, role):
+    """SMILES -> .params for one molecule, with its provenance recorded."""
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+
+    m = Chem.MolFromSmiles(smiles)
+    if m is None:
+        raise ValueError("unparsable SMILES for %s: %s" % (role, smiles))
+    charge = Chem.GetFormalCharge(m)
+    mh = Chem.AddHs(m)
+    if AllChem.EmbedMolecule(mh, randomSeed=0xA11) != 0:
+        raise RuntimeError("could not embed 3D coordinates for %s (%s)" % (role, smiles))
+    AllChem.MMFFOptimizeMolecule(mh)
+    sdf = os.path.join(out_dir, "%s.sdf" % resname)
+    w = Chem.SDWriter(sdf)
+    w.write(mh)
+    w.close()
+
+    meta = from_sdf(sdf, out_dir, name=resname, formal_charge=charge)
+    params = meta["params"] if isinstance(meta, dict) else meta
+    verify_params_charge(params, charge)
+    return {"resname": resname, "params": params, "smiles": smiles,
+            "formal_charge": charge, "role": role, "sdf": sdf,
+            "sha1": _sha1(params),
+            "metadata": meta if isinstance(meta, dict) else {}}
+
+
 def load_metadata(out_dir):
     p = os.path.join(out_dir, META)
     if not os.path.exists(p):

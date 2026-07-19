@@ -87,7 +87,8 @@ def default_decoys(target_smiles, native_smiles=None, extra=()):
 
 def score(candidate, states, decoys, cfg=None, backend=None, x_i=None, pocket=None,
           target_energy=None, native_pdb=None, native_resname=None, native_smiles=None,
-          method="auto"):
+          method="auto", decoy_resnames=None, candidate_residues=None, design_positions=(),
+          second_shell=(), chain="A", symmetric_chains=None):
     """-> dict(specificity, per_decoy)
 
     S_specificity = E(best decoy) - E(target). Positive = the target wins.
@@ -102,6 +103,7 @@ def score(candidate, states, decoys, cfg=None, backend=None, x_i=None, pocket=No
     """
     if target_energy is None:
         raise ValueError("specificity needs the target's own interface energy for comparison")
+    decoy_resnames = decoy_resnames or {}
     per = {}
     failed = []
     for name, smi in decoys:
@@ -116,10 +118,20 @@ def score(candidate, states, decoys, cfg=None, backend=None, x_i=None, pocket=No
             continue
         best = None
         for p in ps:
-            e = backend.score_ligand_pose(p, x_i) if hasattr(backend, "score_ligand_pose") else None
+            # score the decoy ON THIS CANDIDATE: same mutations, same repack, same minimisation as
+            # the target. Scoring it on the WT backbone while target_energy came from the mutated
+            # candidate would make S_specificity partly a measure of the design, not of selectivity.
+            # resname is the DECOY's own - it has its own .params and its own atom topology.
+            e = backend.score_ligand_pose(
+                p, x_i, resname=decoy_resnames.get(name, "TGT"),
+                candidate_residues=candidate_residues,
+                design_positions=design_positions, second_shell=second_shell,
+                chain=chain, symmetric_chains=symmetric_chains
+            ) if hasattr(backend, "score_ligand_pose") else None
             if e is not None and (best is None or e < best):
                 best = e
         per[name] = {"energy": best, "n_poses": len(ps),
+                     "resname": decoy_resnames.get(name),
                      "method": ps[0]["provenance"]["method"] if ps else None}
         if best is None:
             failed.append(name)
@@ -149,19 +161,45 @@ def run(ctx):
     # the native effector, that effector must NOT be a decoy - we would otherwise demand the target
     # out-compete a ligand we explicitly want retained. It is only a decoy in retargeting mode.
     native_as_decoy = None if preserve else rt.get("native_smiles")
-    decoys = default_decoys(rt["target_smiles"], native_as_decoy)
+
+    # decoys come from the SAME params bundle the six states use, so every decoy is scored with
+    # its own .params and its own resname rather than borrowing the target's atom topology
+    lp = ctx.get("ligand_params") or {}
+    bundle_decoys = lp.get("decoys") or {}
+    if bundle_decoys:
+        decoys = [(did, d["smiles"]) for did, d in bundle_decoys.items()]
+        decoy_resnames = {did: d["resname"] for did, d in bundle_decoys.items()}
+    else:
+        decoys = default_decoys(rt.get("target_smiles") or rt.get("smiles"), native_as_decoy)
+        decoy_resnames = {}
+
     method = ctx["poses"]["method"] if ctx.get("poses") else "auto"
+    states_meta = ctx["states"]
+    design_positions = ctx["masks"]["recognition_mask"]
+    second_shell = ctx["masks"].get("transduction_mask", ())
+    chain = states_meta.get("chain", "A")
+    protein_chains = states_meta.get("protein_chains")
+
     out = {}
     for cid, sc in ctx["ligand_scores"].items():
+        cand = ctx["candidates"].get(cid, {})
         out[cid] = score(cid, ctx["candidate_states"][cid], decoys, ctx["cfg"].get("design"),
                          backend=ctx.get("backend"),
-                         x_i=ctx["states"]["paths"]["X_I"],
-                         pocket=ctx["masks"]["recognition_mask"],
+                         x_i=states_meta["paths"]["X_I"],
+                         pocket=design_positions,
                          target_energy=sc.get("E_L_I"),
-                         native_pdb=ctx["states"]["paths"].get("X_I_lig"),
-                         native_resname=ctx["states"].get("effector_resname"),
+                         native_pdb=states_meta["paths"].get("X_I_lig"),
+                         native_resname=states_meta.get("effector_resname"),
                          native_smiles=rt.get("native_smiles"),
-                         method=method)
+                         method=method,
+                         decoy_resnames=decoy_resnames,
+                         # the decoy is scored on THIS candidate, not on WT
+                         candidate_residues=(cand.get("residues") if isinstance(cand, dict)
+                                             else None),
+                         design_positions=design_positions,
+                         second_shell=second_shell,
+                         chain=chain,
+                         symmetric_chains=protein_chains)
     # key must match what allotf.py STAGES declares this stage produces, or the contract check
     # fails and rank never sees the scores
     return {"specificity_scores": out, "preserve_native_response": preserve}

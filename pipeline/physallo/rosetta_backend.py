@@ -239,22 +239,38 @@ class PyRosettaBackend:
         raise ValueError("could not identify the ligand jump in the fold tree; refusing to guess "
                          "jump=1, which would measure the wrong interface")
 
-    def score_ligand_pose(self, pose_record, receptor_pdb, resname="LIG"):
-        """Interface energy of ONE placed ligand against a receptor backbone.
+    def score_ligand_pose(self, pose_record, receptor_pdb, resname="TGT",
+                          candidate_residues=None, design_positions=(), second_shell=(),
+                          chain="A", symmetric_chains=None):
+        """Interface energy of one placed ligand against THIS CANDIDATE's receptor.
 
-        Used for negative design: each decoy is scored with the same function and the same
-        receptor as the target, so S_specificity is a like-for-like comparison rather than two
-        different calculations subtracted.
+        candidate_residues ({resnum: resname}) is not optional for negative design. Scoring a decoy
+        on the WT backbone while the target's E_L_I came from the mutated, repacked candidate
+        compares two different proteins: S_specificity would then partly measure the design itself
+        rather than selectivity. The decoy therefore goes through the SAME mutate/repack and the
+        same restrained minimisation as the target.
+
+        resname must be the DECOY's own residue name, whose .params is in this backend's set - a
+        decoy is a different molecule and cannot borrow the target's atom topology.
         -> float, or None if the complex could not be built.
         """
         import os
         import tempfile
         from ..pose import write_liganded_state
+
         mol = pose_record["mol"] if isinstance(pose_record, dict) else pose_record
-        tmp = os.path.join(tempfile.gettempdir(), "allotf_decoy_%d.pdb" % abs(hash(str(mol))))
+        conf_id = pose_record.get("conf_id", -1) if isinstance(pose_record, dict) else -1
+        tmp = os.path.join(tempfile.gettempdir(),
+                           "allotf_decoy_%s_%d.pdb" % (resname, abs(hash((str(mol), conf_id)))))
         try:
-            write_liganded_state(receptor_pdb, mol, tmp, resname=resname)
+            write_liganded_state(receptor_pdb, mol, tmp, resname=resname, conf_id=conf_id)
             p = self.prepare_pose(tmp)
+            if candidate_residues:
+                p = self.mutate_and_repack(p, candidate_residues, design_positions, second_shell,
+                                           chain, symmetric_chains=symmetric_chains)
+                p = self.restrained_minimize(p, design_positions, second_shell,
+                                             allow_ligand_torsions=True, ligand_rigid_body=False,
+                                             chain=chain, symmetric_chains=symmetric_chains)
             return self.interface_energy(p)
         except Exception:
             return None
@@ -282,19 +298,35 @@ class PyRosettaBackend:
                 continue
         return n
 
-    def ligand_internal_energy(self, pose):
-        """Score of the ligand residue(s) alone - the strain proxy for the placed conformer.
-        None when the pose has no ligand (apo and DNA-only states), which is not zero strain."""
-        self.sfxn(pose)
-        e = pose.energies()
-        vals = []
-        for i in range(1, pose.total_residue() + 1):
-            if pose.residue(i).is_ligand():
-                try:
-                    vals.append(float(e.residue_total_energy(i)))
-                except Exception:
-                    pass
-        return sum(vals) if vals else None
+    def ligand_strain(self, pose):
+        """E_isolated(bound geometry) - E_isolated(relaxed geometry).
+
+        The ligand is EXTRACTED from the complex before scoring. Reading residue_total_energy of
+        the ligand inside the pose includes every protein-ligand interaction, so that number is
+        part of the BINDING energy, not strain - a tightly bound ligand would look "strained"
+        exactly because it binds well. Strain is what the pocket costs the ligand's own internal
+        geometry, so it is the isolated molecule, bound conformation vs relaxed.
+        -> float (>= 0 up to minimiser noise), or None if the pose carries no ligand.
+        """
+        from pyrosetta.rosetta.core.pose import Pose
+        from pyrosetta.rosetta.core.kinematics import MoveMap
+        from pyrosetta.rosetta.protocols.minimization_packing import MinMover
+
+        lig_idx = [i for i in range(1, pose.total_residue() + 1) if pose.residue(i).is_ligand()]
+        if not lig_idx:
+            return None
+        iso = Pose()
+        for i in lig_idx:
+            iso.append_residue_by_jump(pose.residue(i).clone(), max(iso.total_residue(), 1))
+        e_bound = float(self.sfxn(iso))
+
+        relaxed = iso.clone()
+        mm = MoveMap()
+        mm.set_bb(False)
+        mm.set_jump(False)
+        mm.set_chi(True)                 # internal torsions only
+        MinMover(mm, self.sfxn, "lbfgs_armijo_nonmonotone", 0.01, True).apply(relaxed)
+        return e_bound - float(self.sfxn(relaxed))
 
     def contact_pairs(self, pose, resnums, chain="A", cutoff=8.0):
         """-> set of (resnum_i, resnum_j) within cutoff (CB, CA fallback).

@@ -248,8 +248,12 @@ def generate_on_both(ligand_smiles, x_d, x_i, pocket_residues, n_poses=10, **kw)
     return {"X_D": pd, "X_I": pi, "method": sorted(md)[0] if md else None}
 
 
-def write_liganded_state(receptor_pdb, mol, out_path, resname="LIG", chain="X"):
+def write_liganded_state(receptor_pdb, mol, out_path, resname="TGT", chain="X", conf_id=-1):
     """receptor backbone + the placed TARGET ligand -> one PDB (a DL or IL state).
+
+    conf_id is NOT optional in practice: mcs_transfer returns several poses that SHARE one RDKit
+    molecule and differ only by conformer id. Writing without confId emits whichever conformer
+    happens to be default, so the file need not be the pose that was ranked first.
 
     Heteroatoms of the receptor are dropped: the native effector must not ride along beside the
     target. Without these files the liganded states fall back to the native crystal, so DL does not
@@ -257,7 +261,7 @@ def write_liganded_state(receptor_pdb, mol, out_path, resname="LIG", chain="X"):
     """
     from rdkit import Chem
     lig = []
-    for ln in Chem.MolToPDBBlock(mol, flavor=4).splitlines():
+    for ln in Chem.MolToPDBBlock(mol, confId=int(conf_id), flavor=4).splitlines():
         if not ln.startswith(("ATOM", "HETATM")):
             continue
         ln = "HETATM" + ln[6:]
@@ -287,15 +291,23 @@ def pose_confidence(poses, rmsd_cut=2.0):
     what the pose_confidence gate is meant to catch. Returns None when it cannot be assessed
     (a single pose is not evidence of convergence).
     """
-    from rdkit.Chem import AllChem, rdMolAlign
+    from rdkit import Chem
+    from rdkit.Chem import rdMolAlign
     if not poses or len(poses) < 2:
         return None
-    ref = poses[0]["mol"]
+    ref = poses[0]
+    ref_mol = Chem.RemoveHs(ref["mol"])
     close = 1
     for p in poses[1:]:
         try:
-            if rdMolAlign.GetBestRMS(AllChem.RemoveHs(p["mol"]),
-                                     AllChem.RemoveHs(ref)) <= rmsd_cut:
+            # CalcRMS, never GetBestRMS: these coordinates live in the RECEPTOR frame, and
+            # GetBestRMS re-superposes the two molecules first - two poses pointing in opposite
+            # directions in the pocket would be aligned onto each other and scored as converged.
+            prb = ref_mol if p["mol"] is ref["mol"] else Chem.RemoveHs(p["mol"])
+            rms = rdMolAlign.CalcRMS(prb, ref_mol,
+                                     prbId=int(p.get("conf_id", -1)),
+                                     refId=int(ref.get("conf_id", -1)))
+            if rms <= rmsd_cut:
                 close += 1
         except Exception:
             continue
@@ -325,8 +337,10 @@ def run(ctx):
         ps = poses.get(backbone) or []
         if not ps:
             raise RuntimeError("no target pose on %s: the %s state cannot be built" % (backbone, key))
-        paths[key] = write_liganded_state(paths[backbone], ps[0]["mol"],
-                                          os.path.join(out_dir, key + ".pdb"), resname=resname)
+        top = ps[0]
+        paths[key] = write_liganded_state(paths[backbone], top["mol"],
+                                          os.path.join(out_dir, key + ".pdb"), resname=resname,
+                                          conf_id=top.get("conf_id", -1))
         conf[backbone] = pose_confidence(ps)
     # one number for the target placement as a whole: the weaker of the two backbones, because a
     # confident IL beside a scattered DL still makes the double difference unreliable
