@@ -41,12 +41,25 @@ def resolve_threshold(expr, controls, metric):
         except KeyError:
             raise KeyError("no control '%s' calibrated for metric '%s' - calibration is mandatory,"
                            " never fall back to a raw zero" % (name, metric))
-        k = float(m.group("k")) * c["sigma"]
-        return c["value"] + (k if m.group("op") == "+" else -k)
+        if c.get("sigma") is None:
+            # calibration reports sigma=None when a control had a single replicate. Treating that
+            # as 0 would collapse "control +/- k*sigma" onto the control value and make the gate
+            # infinitely sharp; guessing a sigma would be worse. Say which control is under-sampled.
+            raise ValueError(
+                "control '%s' has no measured sigma for metric '%s' (n=%s): the threshold '%s' "
+                "cannot be resolved. Raise calibration.robustness.min_structure_pairs, or supply "
+                "replicate structures/poses for this control."
+                % (name, metric, c.get("n"), s))
+        k = float(m.group("k")) * float(c["sigma"])
+        return float(c["value"]) + (k if m.group("op") == "+" else -k)
     m2 = re.match(r"^\s*([\d.]+)\s*\*\s*sigma\s*$", s)
     if m2:
-        sig = max(c[metric]["sigma"] for c in controls.values() if metric in c)
-        return float(m2.group(1)) * sig
+        sigmas = [c[metric]["sigma"] for c in controls.values()
+                  if metric in c and c[metric].get("sigma") is not None]
+        if not sigmas:
+            raise ValueError("no control has a measured sigma for metric '%s': the threshold '%s' "
+                             "cannot be resolved (every control was single-replicate)" % (metric, s))
+        return float(m2.group(1)) * max(sigmas)
     return float(s)
 
 
@@ -103,6 +116,11 @@ def apply_gates(f, cfg, control_metrics, topology_mode="auto", route_direction=N
 
     if f["S_specificity"] < T(g["specificity"]["min"], "S_specificity"):
         bad.append("specificity: not selective against decoys")
+    # No host-metabolite gate on purpose. A charged metabolite's Rosetta energy is not comparable
+    # to a hydrophobic effector's, so the difference cannot carry a pass/fail decision, and a
+    # docking failure means the pose method does not apply rather than that the molecule is
+    # excluded. Cellular mis-activation is measured where it is measurable: basal leak in the
+    # fluorescence assay. metabolite_margin is carried in the report for inspection only.
     if f["clash_count"] > T(g["state_integrity"]["fold_clash"]["max"], "clash_count"):
         bad.append("fold_clash: fold clashes above WT")
     if f.get("ligand_strain", 1e9) > g["state_integrity"]["ligand_strain"]["max"]:
@@ -312,6 +330,9 @@ def assemble_candidate_features(ctx):
             "E_DNA_X_D": dna["E_DNA_X_D"],
             "S_release": dna["S_release"],
             "S_specificity": spec.get("specificity"),
+            # None when no metabolite could be posed: the gate skips it rather than failing the
+            # candidate, but a posed metabolite that beats the target is caught
+            "metabolite_margin": spec.get("metabolite_margin"),
             "clash_count": state["clash_count"],
             "template_similarity": state["template_similarity"],
             "ligand_strain": state["ligand_strain"],

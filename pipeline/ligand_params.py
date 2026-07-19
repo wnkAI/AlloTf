@@ -156,24 +156,50 @@ def run(ctx):
     poses = ctx.get("poses") or {}
     target_resname = poses.get("target_resname", "TGT")
 
-    target = _parameterise(target_smiles, out_dir, target_resname, "target")
+    # THE TARGET IS PARAMETERISED FROM THE POSE'S OWN MOLECULE, not re-embedded from SMILES.
+    # X_D_lig / X_I_lig were written from that molecule; a fresh embed gives a different atom order,
+    # so the .params atom names would not match the ligand in those PDBs and Rosetta would either
+    # reject the residue or silently rebuild it against the wrong correspondence.
+    top = None
+    for key in ("X_I", "X_D"):
+        ps = poses.get(key) or []
+        if ps:
+            top = ps[0]
+            break
+    if top is None:
+        raise RuntimeError("no target pose available: ligand_params must parameterise the SAME "
+                           "molecule the liganded-state PDBs were written from")
+    target = _parameterise_mol(top["mol"], out_dir, target_resname, "target",
+                               conf_id=top.get("conf_id", -1), smiles=target_smiles)
 
-    # decoys: same decoy set specificity will score, parameterised here so both stages agree
+    # the params atom names must match the ligand actually sitting in the liganded states
+    checked = []
+    for state_key in ("X_D_lig", "X_I_lig"):
+        pdb = (ctx.get("states") or {}).get("paths", {}).get(state_key)
+        if pdb and os.path.exists(pdb):
+            check_matches_pdb(target["params"], pdb, target_resname)   # raises on any mismatch
+            checked.append(state_key)
+    if not checked:
+        raise RuntimeError("neither X_D_lig nor X_I_lig exists yet: ligand_params must run AFTER "
+                           "pose, so the params can be checked against the actual pose PDBs")
+
+    # decoys: the same set specificity will score. Their SDFs are kept in the bundle so specificity
+    # reads the molecule back from there rather than re-embedding it - same reason as the target.
     from .specificity import default_decoys
     preserve = ctx.get("cfg", {}).get("objective", {}).get("preserve_native_response", False)
     native = None if preserve else rt.get("native_smiles")
     decoys = {}
-    for i, smi in enumerate(default_decoys(target_smiles, native) or []):
+    for i, (name, smi) in enumerate(default_decoys(target_smiles, native) or [], start=1):
         if not smi or smi == target_smiles:
             continue
-        did = "D%02d" % (i + 1)
-        resname = "D%02d" % (i + 1)
+        did = "D%02d" % i
         try:
-            decoys[did] = _parameterise(smi, out_dir, resname,
-                                        "native_effector" if smi == native else "decoy_%d" % (i + 1))
+            decoys[did] = _parameterise(smi, out_dir, did, role=name)
+            decoys[did]["decoy_name"] = name
         except Exception as exc:
-            raise RuntimeError("decoy %s (%s) could not be parameterised: %s. A decoy without its "
-                               "own params cannot be scored against the target." % (did, smi, exc))
+            raise RuntimeError("decoy %s (%s / %s) could not be parameterised: %s. A decoy without "
+                               "its own params cannot be scored against the target."
+                               % (did, name, smi, exc))
 
     all_params = [target["params"]] + [d["params"] for d in decoys.values()]
     bundle_hash = hashlib.sha1("|".join(sorted(_sha1(p) for p in all_params)).encode()).hexdigest()[:12]
@@ -184,31 +210,57 @@ def run(ctx):
     return {"ligand_params": bundle}
 
 
+def _parameterise_mol(mol, out_dir, resname, role, conf_id=-1, smiles=None):
+    """One RDKit MOLECULE -> .params, written from that molecule's own coordinates.
+
+    This is the path the target takes, because its pose PDBs (X_D_lig / X_I_lig) were written from
+    this same object. Writing the SDF from it keeps ONE atom order across target.sdf and both
+    liganded-state PDBs, which is what makes the .params atom names line up with the ligand Rosetta
+    reads out of those files.
+    """
+    from rdkit import Chem
+    charge = Chem.GetFormalCharge(mol)
+    sdf = os.path.join(out_dir, "%s.sdf" % resname)
+    w = Chem.SDWriter(sdf)
+    w.write(mol, confId=int(conf_id))
+    w.close()
+
+    meta = from_sdf(sdf, out_dir, name=resname, formal_charge=charge)
+    params = meta["params"] if isinstance(meta, dict) else meta
+    verify_params_charge(params, charge)
+
+    # per-molecule provenance: from_sdf writes one fixed META filename, so each call would
+    # otherwise overwrite the previous molecule's record
+    shared = os.path.join(out_dir, META)
+    own = os.path.join(out_dir, "%s_metadata.json" % resname)
+    if os.path.exists(shared):
+        try:
+            os.replace(shared, own)
+        except OSError:
+            own = shared
+
+    return {"resname": resname, "params": params,
+            "smiles": smiles or Chem.MolToSmiles(Chem.RemoveHs(mol)),
+            "formal_charge": charge, "role": role, "sdf": sdf,
+            "metadata_json": own,
+            "sha1": _sha1(params),
+            "metadata": meta if isinstance(meta, dict) else {}}
+
+
 def _parameterise(smiles, out_dir, resname, role):
-    """SMILES -> .params for one molecule, with its provenance recorded."""
+    """SMILES -> .params. Used for decoys, which have no pre-existing pose; the SDF written here is
+    kept in the bundle so specificity poses THIS molecule rather than re-embedding its SMILES."""
     from rdkit import Chem
     from rdkit.Chem import AllChem
 
     m = Chem.MolFromSmiles(smiles)
     if m is None:
         raise ValueError("unparsable SMILES for %s: %s" % (role, smiles))
-    charge = Chem.GetFormalCharge(m)
     mh = Chem.AddHs(m)
     if AllChem.EmbedMolecule(mh, randomSeed=0xA11) != 0:
         raise RuntimeError("could not embed 3D coordinates for %s (%s)" % (role, smiles))
     AllChem.MMFFOptimizeMolecule(mh)
-    sdf = os.path.join(out_dir, "%s.sdf" % resname)
-    w = Chem.SDWriter(sdf)
-    w.write(mh)
-    w.close()
-
-    meta = from_sdf(sdf, out_dir, name=resname, formal_charge=charge)
-    params = meta["params"] if isinstance(meta, dict) else meta
-    verify_params_charge(params, charge)
-    return {"resname": resname, "params": params, "smiles": smiles,
-            "formal_charge": charge, "role": role, "sdf": sdf,
-            "sha1": _sha1(params),
-            "metadata": meta if isinstance(meta, dict) else {}}
+    return _parameterise_mol(mh, out_dir, resname, role, conf_id=-1, smiles=smiles)
 
 
 def load_metadata(out_dir):

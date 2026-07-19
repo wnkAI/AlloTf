@@ -39,17 +39,20 @@ STAGES = [
     ("design",        "C", "PhysAllo physics-grounded pocket design (aa_filter + rotamer search)",
      ["states", "poses", "masks", "ligand_params"], ["candidates"]),
     ("state_builder", "D", "six PyRosetta states per candidate (D0/I0/DL/IL/D_DNA/I_DNA)",
-     ["candidates", "states", "poses", "ligand_params"], ["candidate_states"]),
+     ["candidates", "states", "poses", "ligand_params"], ["candidate_states", "backend"]),
     ("ligand_score",  "D", "dG_lig, dG_apo, ddG_coupling",
      ["candidate_states"], ["ligand_scores"]),
     ("dna_release",   "D", "S_release as a double difference, sign from topology",
      ["candidate_states"], ["dna_scores"]),
+    ("calibration",   "D", "score the scaffold's WT (and any declared negative) controls",
+     ["states", "poses", "ligand_params", "template", "masks", "backend"],
+     ["control_metrics", "control_scores"]),
     ("specificity",   "D", "negative design vs native / analogues / metabolites",
      ["candidate_states", "ligand_scores", "candidates", "states", "masks", "ligand_params",
       "route"], ["specificity_scores"]),
     ("rank",          "E", "control calibration -> hard gates -> Pareto -> diversity",
      ["candidates", "candidate_states", "ligand_scores", "dna_scores", "specificity_scores",
-      "cfg_scoring"], ["ranked"]),
+      "control_metrics", "control_scores", "cfg_scoring"], ["ranked"]),
 ]
 MODE_MAP = {"auto": None, "enhance": "ENHANCEMENT", "retarget": "RETARGETING"}
 

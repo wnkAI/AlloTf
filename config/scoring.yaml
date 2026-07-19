@@ -117,6 +117,16 @@ hard_gates:
     min: "wt_native_holo - 2.0*sigma"
     scope: transduction_and_output_only  # the pocket is expected to differ - do not score it
 
+  # NOTE - deliberately NO host-metabolite gate.
+  # Generic metabolites (ATP, glucose, NADH) are not a defensible computational decoy set for a
+  # hydrophobic effector pocket: there is no competitive-binding hypothesis, and Rosetta energies
+  # of highly charged molecules are not comparable to a hydrophobic ligand's, so the difference
+  # would not mean what a gate needs it to mean. Failure to dock also says the pose method does not
+  # apply, not that the molecule does not bind - gating on it manufactures false negatives.
+  # The real question behind metabolites - does the sensor sit ON in the cell - is measured
+  # directly and reliably by the fluorescence assay, as basal leak B under the B < B_max
+  # constraint. That is where it belongs.
+
 # ---------------------------------------------------------------------------
 # Only candidates passing ALL gates reach ranking. Pareto, not a weighted sum: a candidate that
 # fails any gate is not a sensor no matter how well it binds.
