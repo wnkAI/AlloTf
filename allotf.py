@@ -173,6 +173,9 @@ def finalize_design(ctx, project, n_initial):
     _write_plate_layout(os.path.join(project, "initial_%d_plate_layout.csv" % len(initial)),
                         initial_ids, conc)
     _write_features(os.path.join(project, "initial_%d_features.csv" % len(initial)), feat_rows)
+
+    from pipeline import manifest
+    manifest.write(ctx, project, ctx.get("args"))
     print("\ndesign done -> %d plasmids on plate 1, %d candidates in the pool, in %s"
           % (len(initial), len(candidates), project))
     return 0
@@ -274,7 +277,7 @@ def cmd_design(a):
     os.makedirs(project, exist_ok=True)
 
     ctx = dict(cfg=cfg, cfg_scoring=cfg_scoring, out_dir=project, scaffold=scaffold, route=r,
-               target=a.target, mode=r["mode"], hit=hit, seed=a.seed, started=time.time())
+               target=a.target, mode=r["mode"], hit=hit, seed=a.seed, started=time.time(), args=a)
     for name, owner, desc, req, prod in STAGES[1:]:
         print("\n[%s] (%s) %s" % (name, owner, desc))
         try:
