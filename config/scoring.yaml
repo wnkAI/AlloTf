@@ -5,15 +5,39 @@
 # Calibration - MANDATORY. Absolute energies are not comparable across structures, operators or
 # force-field preparation, so no gate uses a raw zero. Every gate is expressed in units of the
 # scaffold's OWN WT controls, scored with the SAME preparation:
-#   wt_apo             WT, no ligand        -> the "not constitutive" reference
-#   wt_native_holo     WT + native effector -> a known working switch (positive control)
-#   known_constitutive known always-ON      -> negative control, MUST be rejected
-#   known_dead         known non-responder  -> negative control, MUST be rejected
-# A scaffold that cannot reproduce its own controls is REJECTED before any design is generated.
+# NEGATIVE CONTROLS ARE OPTIONAL IN AVAILABILITY, MANDATORY IN BEHAVIOUR WHEN DECLARED.
+#   no literature negative control  -> the scaffold still runs, at a recorded lower validation level
+#   a negative control is declared  -> it MUST be rejected by its own diagnostic gate, or STOP
+#   WT native system not reproduced -> STOP unconditionally
+# Requiring every TF to have known constitutive / non-binding / dead mutants would exclude most
+# designable scaffolds; allowing a scaffold to skip calibration entirely would leave the six-state
+# energies with nothing to be relative to. Hence: WT mandatory, negatives conditional.
 calibration:
-  required: true
-  controls: [wt_apo, wt_native_holo, known_constitutive, known_dead]
+  required: true               # never false - see above
   margin_sigma: 1.0            # gate fires at: control_value +/- margin_sigma * sigma(control)
+
+  mandatory_controls:          # missing either of these -> scaffold rejected
+    - wt_apo                   # metric baseline, the "not constitutive" reference
+    - wt_native_holo           # the scaffold's own working switch; must reproduce its direction
+
+  optional_validation_controls:   # each names the gate that MUST be the one to catch it
+    known_constitutive:
+      expected_failure_gate: apo_state_bias
+    known_nonbinder:
+      expected_failure_gate: target_binding
+    known_dna_defective:
+      expected_failure_gate: apo_dna_competence
+    known_nonresponder:        # replaces the ambiguous "known_dead": a dead mutant may fail to
+                               # express, to bind ligand, to bind DNA, to switch, or to release -
+                               # those are different gates and cannot all be charged to coupling
+      expected_failure_any:
+        - coupling
+        - ligand_prefers_induced
+        - dna_release
+        - allosteric_template
+
+  require_all_declared_optional: true   # declared but not caught by its gate -> STOP
+
   robustness:                  # sign+margin must survive all of these before a candidate is trusted
     min_structure_pairs: 2     # independent experimental X_D / X_I pairs
     min_poses: 3               # independent target poses
@@ -83,10 +107,14 @@ hard_gates:
 
   # 8. allosteric template similarity. On IMPOSED backbones this is partly tautological, so it is
   #    used ONLY to reject designs that clearly break the path - never as positive evidence of
-  #    coupling. Calibrated against known dead mutants, not the arbitrary 0.5 of the first draft.
+  #    coupling.
+  #    THE RULER IS WT, NOT A NEGATIVE CONTROL. Anchoring this on known_dead made the threshold
+  #    uncomputable for any scaffold without such a mutant, which contradicts negative controls
+  #    being optional. WT defines the scale; declared negatives only verify that the scale
+  #    actually separates broken variants.
   allosteric_template:
     metric: template_similarity
-    min: "known_dead + 1.0*sigma"
+    min: "wt_native_holo - 2.0*sigma"
     scope: transduction_and_output_only  # the pocket is expected to differ - do not score it
 
 # ---------------------------------------------------------------------------

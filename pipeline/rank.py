@@ -61,8 +61,17 @@ def release_sign(topology_mode, route_direction=None):
     return +1
 
 
-def apply_gates(f, cfg, controls, topology_mode="auto", route_direction=None):
-    """-> (passed: bool, reasons: list[str]). Fail closed on any missing feature."""
+def apply_gates(f, cfg, control_metrics, topology_mode="auto", route_direction=None):
+    """-> (passed: bool, reasons: list[str]). Fail closed on any missing feature.
+
+    Every reason STARTS WITH ITS GATE NAME ("apo_state_bias: ..."). check_controls relies on that
+    prefix to verify a declared negative control was rejected BY ITS OWN diagnostic gate - a
+    constitutive mutant that merely trips the strain gate is a coincidence, not evidence the
+    apo-bias gate works.
+
+    control_metrics is {control: {metric: {'value','sigma'}}} - the NUMBERS thresholds resolve
+    against, never the name list from config.
+    """
     g = cfg["hard_gates"]
     bad = []
 
@@ -71,100 +80,125 @@ def apply_gates(f, cfg, controls, topology_mode="auto", route_direction=None):
         if missing:
             return False, ["missing:" + ",".join(missing)]
     if not f.get("all_states_packed", False):
-        bad.append("a state failed to pack")
+        bad.append("packing: a state failed to pack")
 
-    T = lambda e, metric: resolve_threshold(e, controls, metric)
+    T = lambda e, metric: resolve_threshold(e, control_metrics, metric)
 
     if f["E_L_I"] > T(g["target_binding"]["max"], "E_L_I"):
-        bad.append("target does not bind (E_L_I above WT native effector)")
+        bad.append("target_binding: target does not bind (E_L_I above WT native effector)")
     if f["dG_apo"] < T(g["apo_state_bias"]["min"], "dG_apo"):
-        bad.append("constitutive: apo already prefers the induced state")
+        bad.append("apo_state_bias: constitutive - apo already prefers the induced state")
     if f["ddG_coupling"] > T(g["coupling"]["max"], "ddG_coupling"):
-        bad.append("ligand does not shift the state population (weak linkage)")
+        bad.append("coupling: ligand does not shift the state population (weak linkage)")
     if "ligand_prefers_induced" in g and \
             f["dG_lig"] > T(g["ligand_prefers_induced"]["max"], "dG_lig"):
-        bad.append("holo protein still prefers D: ddG_coupling was bought by apo bias, not a switch")
+        bad.append("ligand_prefers_induced: holo protein still prefers D - ddG_coupling was bought "
+                   "by apo bias, not a switch")
     if f["E_DNA_X_D"] > T(g["apo_dna_competence"]["max"], "E_DNA_X_D"):
-        bad.append("apo can no longer hold the operator")
+        bad.append("apo_dna_competence: apo can no longer hold the operator")
 
     s = release_sign(topology_mode, route_direction)
     if s * f["S_release"] < T(g["dna_release"]["min"], "S_release"):
-        bad.append("induced state does not release DNA (sign-corrected)")
+        bad.append("dna_release: induced state does not release DNA (sign-corrected)")
 
     if f["S_specificity"] < T(g["specificity"]["min"], "S_specificity"):
-        bad.append("not selective against decoys")
+        bad.append("specificity: not selective against decoys")
     if f["clash_count"] > T(g["state_integrity"]["fold_clash"]["max"], "clash_count"):
-        bad.append("fold clashes above WT")
+        bad.append("fold_clash: fold clashes above WT")
     if f.get("ligand_strain", 1e9) > g["state_integrity"]["ligand_strain"]["max"]:
-        bad.append("ligand strained")
+        bad.append("ligand_strain: ligand strained")
     # S_state (interface) and ddG_coup (double difference) are the same claim measured two ways.
     # ligand_score.consistency() flags when they disagree; a disagreement means the pose moved
     # during packing, so the candidate is rejected rather than averaged (GPT-5.6 caught this being
     # computed and then ignored). Only enforced when the field is present.
     if "agree" in f and f["agree"] is False:
-        bad.append("S_state and ddG_coupling disagree: unstable pose, not a trustworthy switch")
+        bad.append("agreement: S_state and ddG_coupling disagree - unstable pose, not a "
+                   "trustworthy switch")
     if f.get("pose_confidence", -1) < g["state_integrity"]["pose_confidence"]["min"]:
-        bad.append("low pose confidence")
+        bad.append("pose_confidence: low pose confidence")
     if f["template_similarity"] < T(g["allosteric_template"]["min"], "template_similarity"):
-        bad.append("allosteric path broken (worse than known dead mutants)")
+        bad.append("allosteric_template: allosteric path broken (below the WT template scale)")
 
     return (len(bad) == 0), bad
 
 
-# what each control MUST do to the gates, and - for the negatives - WHICH gate must be the one that
-# catches it. A constitutive mutant that fails only because its ligand is strained is not evidence
-# the apo-bias gate works; it is a coincidence that would collapse the moment a real design fails
-# the same way. So the negatives name their diagnostic gate (GPT-5.6).
-CONTROL_EXPECT = {
-    "wt_native_holo":     {"pass": True},
-    "known_constitutive": {"pass": False, "by": "constitutive: apo already prefers the induced state"},
-    "known_dead":         {"pass": False, "by": "ligand does not shift the state population (weak linkage)"},
-    "known_nonbinder":    {"pass": False, "by": "target does not bind (E_L_I above WT native effector)"},
-}
+def check_controls(control_scores, cfg, control_metrics, topology_mode="auto",
+                   route_direction=None):
+    """Calibrate the scaffold on its OWN controls before any design is generated.
 
+    Negative controls are OPTIONAL IN AVAILABILITY, MANDATORY IN BEHAVIOUR WHEN DECLARED:
 
-def check_controls(control_scores, cfg, controls, topology_mode="auto", route_direction=None):
-    """Before ANY design is generated: the scaffold must reproduce its own controls.
-    wt_native_holo must PASS the gates; known_constitutive and known_dead must FAIL.
-    -> (ok, report). A scaffold that fails this must not enter design.
+        mandatory (wt_apo, wt_native_holo) missing        -> STOP
+        WT native system does not reproduce a switch      -> STOP
+        an optional negative control is absent            -> record it, continue at a lower
+                                                             validation level
+        a declared negative control is NOT caught by its
+        own diagnostic gate                               -> STOP
 
-    This is the calibration check, and it is the only thing standing between us and a confidently
-    ranked list computed on a scaffold whose energies mean nothing. It runs BEFORE design, so the
-    cost of a bad scaffold is one control run, not ten thousand designs.
+    Requiring every scaffold to have known constitutive / non-binding / dead mutants would exclude
+    most designable TFs; letting a scaffold skip calibration would leave its six-state energies
+    with no internal reference. Hence WT is mandatory and negatives are conditional.
 
-    A control that is absent is not a pass. Every control named in CONTROL_EXPECT must be present
-    and behave, or the scaffold is rejected - a scaffold with no known constitutive mutant simply
-    cannot be validated this way, and pretending otherwise is how the constitutive-mutant bug got
-    through the first time.
+    Expectations come from cfg['calibration'], never from a hardcoded table: which mutants exist
+    is a property of the scaffold's literature, not of this module.
+    -> (ok, report) with report['validation_level'].
     """
-    report, ok = {}, True
-    missing = [k for k in CONTROL_EXPECT if k not in control_scores]
-    if missing:
-        return False, {"missing_controls": missing,
-                       "note": "cannot calibrate: no control means no evidence the gates work "
-                               "on this scaffold"}
-    for name, want in CONTROL_EXPECT.items():
-        passed, reasons = apply_gates(control_scores[name], cfg, controls,
-                                      topology_mode, route_direction)
-        good = (passed == want["pass"])
-        # a negative control must fail FOR THE RIGHT REASON: the diagnostic gate must fire, not
-        # merely some gate. Otherwise a lucky failure masquerades as a working filter.
-        right_reason = True
-        if not want["pass"] and good:
-            right_reason = any(want["by"] in r for r in reasons)
-            good = good and right_reason
-            ok &= good
+    cal = cfg.get("calibration", {})
+    mandatory = list(cal.get("mandatory_controls", ["wt_apo", "wt_native_holo"]))
+    optional = dict(cal.get("optional_validation_controls", {}))
+
+    missing_mandatory = [n for n in mandatory if n not in control_scores]
+    if missing_mandatory:
+        return False, {"missing_mandatory_controls": missing_mandatory,
+                       "verdict": "scaffold rejected: WT calibration is incomplete - without it "
+                                  "the six-state energies have no internal reference"}
+
+    report = {"mandatory": {}, "optional": {}, "optional_missing": []}
+
+    # the scaffold must reproduce its own native switch
+    passed, reasons = apply_gates(control_scores["wt_native_holo"], cfg, control_metrics,
+                                  topology_mode, route_direction)
+    report["mandatory"]["wt_native_holo"] = {"passed": passed, "reasons": reasons}
+    if not passed:
+        report["verdict"] = ("scaffold rejected: its native ligand + WT system does not reproduce "
+                             "a functional switch, so the gates cannot be trusted here")
+        return False, report
+    # wt_apo is a metric baseline, not a holo sensor - it is not run through the gates
+    report["mandatory"]["wt_apo"] = {"available": True,
+                                     "metrics": sorted(control_scores["wt_apo"])}
+
+    strict = cal.get("require_all_declared_optional", True)
+    passed_optional = []
+    for name, spec in optional.items():
+        if name not in control_scores:
+            report["optional_missing"].append(name)
+            continue
+        ok_gates, why = apply_gates(control_scores[name], cfg, control_metrics,
+                                    topology_mode, route_direction)
+        expect_gate = spec.get("expected_failure_gate")
+        expect_any = spec.get("expected_failure_any", [])
+        # reasons are prefixed with their gate name, so this checks the RIGHT gate fired
+        if expect_gate:
+            right = any(r.startswith(expect_gate + ":") for r in why)
         else:
-            ok &= good
-        report[name] = {"passed": passed, "expected": want["pass"], "as_expected": good,
-                        "reasons": reasons,
-                        "diagnostic_gate": want.get("by"),
-                        "caught_by_right_gate": right_reason if not want["pass"] else None}
-    if not ok:
-        report["verdict"] = ("this scaffold does not separate its own controls (or a control fails "
-                            "for the wrong reason): the gates cannot tell a working sensor from a "
-                            "broken one here. Do not design on it.")
-    return ok, report
+            right = any(r.startswith(g + ":") for g in expect_any for r in why)
+        valid = (not ok_gates) and right
+        report["optional"][name] = {"passed_gates": ok_gates, "rejected_as_expected": valid,
+                                    "expected_gate": expect_gate or expect_any, "reasons": why}
+        if not valid and strict:
+            report["verdict"] = ("scaffold rejected: declared control %s was not rejected by its "
+                                 "expected mechanism gate" % name)
+            return False, report
+        if valid:
+            passed_optional.append(name)
+
+    report["validation_level"] = ("native_plus_negative_controls" if passed_optional
+                                  else "native_controls_only")
+    report["mandatory_controls_passed"] = mandatory
+    report["optional_controls_passed"] = passed_optional
+    report["optional_controls_missing"] = report["optional_missing"]
+    report["verdict"] = "calibration passed"
+    return True, report
 
 
 def dominates(a, b, objectives, maximize):
@@ -296,29 +330,41 @@ def run(ctx):
     cfg = ctx["cfg_scoring"]
     # assembled here rather than by a separate stage: one owner, one field vocabulary
     features = ctx.get("candidate_features") or assemble_candidate_features(ctx)
-    controls = ctx.get("controls") or cfg.get("calibration", {}).get("controls") or {}
+
+    # THREE DISTINCT THINGS - never substitute one for another:
+    #   cfg['calibration']    the SPEC: which controls are mandatory, which gate each declared
+    #                         negative must trip
+    #   ctx['control_metrics'] the NUMBERS: {control: {metric: {'value','sigma',...}}}, what
+    #                         thresholds like "wt_apo + 1.0*sigma" resolve against
+    #   ctx['control_scores'] full feature ROWS per control, to actually run the gates on
+    # Falling back to cfg['calibration']['controls'] would hand resolve_threshold a list of NAMES
+    # where it expects per-metric values, and every threshold would silently fail to resolve.
+    control_metrics = ctx.get("control_metrics") or {}
+    if not control_metrics:
+        raise RuntimeError(
+            "no control_metrics: every gate is expressed relative to this scaffold's own controls "
+            "(e.g. 'wt_apo + 1.0*sigma') and cannot resolve without their per-metric values. "
+            "config lists control NAMES, not numbers - it is not a substitute.")
     topo = cfg.get("topology", {}).get("mode", "auto")
     direction = (ctx.get("route") or {}).get("direction")
 
     cs = ctx.get("control_scores")
-    fail_closed = cfg.get("fail_closed", True)
+    validation_level = None
     if not cs:
-        # calibration is mandatory: without controls we cannot show the gates work on this
-        # scaffold, and an uncalibrated ranking is exactly the thing this module exists to refuse.
-        if fail_closed:
-            raise RuntimeError("no control_scores: the scaffold's own controls are required before "
-                               "ranking (wt must pass, constitutive/dead/nonbinder must fail). "
-                               "Set fail_closed:false only to knowingly skip calibration.")
-    else:
-        ok, report = check_controls(cs, cfg, controls, topo, direction)
-        ctx["control_report"] = report
-        if not ok and fail_closed:
-            raise RuntimeError("scaffold failed its own control separation: %s"
-                               % report.get("verdict", report))
+        # calibration is not optional: WT is what the six-state energies are relative to.
+        raise RuntimeError(
+            "no control_scores: this scaffold's own WT controls (wt_apo, wt_native_holo) must be "
+            "scored before ranking. Negative controls may be absent - WT may not.")
+    ok, report = check_controls(cs, cfg, control_metrics, topo, direction)
+    ctx["control_report"] = report
+    if not ok:
+        raise RuntimeError("scaffold failed calibration: %s" % report.get("verdict", report))
+    # evidence level, not performance: it is recorded and reported, never fed to the Pareto score
+    validation_level = report.get("validation_level")
 
     kept, rejected = [], []
     for c in features:
-        passed, reasons = apply_gates(c, cfg, controls, topo, direction)
+        passed, reasons = apply_gates(c, cfg, control_metrics, topo, direction)
         (kept if passed else rejected).append(dict(c, _reasons=reasons))
 
     objectives = cfg["pareto"]["objectives"]
@@ -343,12 +389,16 @@ def run(ctx):
     out_dir = ctx.get("out_dir", ".")
     os.makedirs(out_dir, exist_ok=True)
     csv_path = os.path.join(out_dir, "ranked_candidates.csv")
-    cols = ["id", "sequence"] + REQUIRED + ["_reasons"]
+    # validation_level travels WITH every ranked row: a reader must see on what evidence this
+    # scaffold was calibrated. It is not an objective and never enters the Pareto score.
+    cols = ["id", "sequence"] + REQUIRED + ["validation_level", "_reasons"]
     with open(csv_path, "w", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         wr.writeheader()
         for c in front:
-            wr.writerow({k: c.get(k) for k in cols})
+            row = {k: c.get(k) for k in cols}
+            row["validation_level"] = validation_level
+            wr.writerow(row)
     fasta_path = os.path.join(out_dir, "final_%d.fasta" % len(final))
     with open(fasta_path, "w") as f:
         for c in final:
@@ -357,4 +407,9 @@ def run(ctx):
     return {"ranked": {"front": front, "final": final, "rejected": len(rejected),
                        "n_in": len(features), "n_passed": len(kept),
                        "csv": csv_path, "fasta": fasta_path,
-                       "diversity_shortfall": max(0, n_final - len(final))}}
+                       "diversity_shortfall": max(0, n_final - len(final)),
+                       # evidence level of the calibration behind this ranking
+                       "validation_level": validation_level,
+                       "mandatory_controls_passed": report.get("mandatory_controls_passed", []),
+                       "optional_controls_passed": report.get("optional_controls_passed", []),
+                       "optional_controls_missing": report.get("optional_controls_missing", [])}}

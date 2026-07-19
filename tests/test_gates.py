@@ -22,9 +22,15 @@ CTRL = {
         "dG_lig":       {"value": -2.5, "sigma": 0.5},  # ligand-bound WT prefers X_I (negative)
         "ddG_coupling": {"value": -3.0, "sigma": 0.5},  # strong shift (negative)
         "S_release":    {"value":  2.5, "sigma": 0.5},  # lets DNA go (POSITIVE)
+        # WT DEFINES the template ruler (sigma = spread across its own structure ensemble).
+        # This used to be anchored on known_dead, which made the threshold uncomputable for any
+        # scaffold lacking such a mutant - contradicting negative controls being optional.
+        "template_similarity": {"value": 1.0, "sigma": 0.12},
     },
+    # Negative controls are optional in availability, mandatory in behaviour when declared.
+    # They VERIFY the ruler separates broken variants; they no longer DEFINE any threshold.
     "known_constitutive": {"dG_apo": {"value": -1.0, "sigma": 0.5}},
-    "known_dead": {
+    "known_nonresponder": {
         "template_similarity": {"value": 0.3, "sigma": 0.1},
         "S_specificity":       {"value": 0.0, "sigma": 0.4},
     },
