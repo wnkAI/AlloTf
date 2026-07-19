@@ -38,7 +38,8 @@ BACKBONE = {"D0": "X_D", "DL": "X_D", "D_DNA": "X_D",
             "I0": "X_I", "IL": "X_I", "I_DNA": "X_I"}
 
 
-def build_six(backend, candidate, templates, design_positions, second_shell=(), chain="A"):
+def build_six(backend, candidate, templates, design_positions, second_shell=(), chain="A",
+              symmetric_chains=None):
     """backend: one PyRosettaBackend shared by all six states (this is the whole point).
     templates: {'X_D': pdb, 'X_I': pdb, 'X_D_DNA': pdb, 'X_I_DNA': pdb,
                 'X_D_lig': pdb, 'X_I_lig': pdb}
@@ -55,10 +56,14 @@ def build_six(backend, candidate, templates, design_positions, second_shell=(), 
             continue
         pose = backend.prepare_pose(tpl)
         _assert_state_label(backend, pose, st, tpl)
-        pose = backend.mutate_and_repack(pose, candidate, design_positions, second_shell, chain)
+        # a homodimer carries the pocket in every subunit: mutate and relax them all, or the pose
+        # is a mutant-subunit / WT-subunit chimera that exists nowhere
+        pose = backend.mutate_and_repack(pose, candidate, design_positions, second_shell, chain,
+                                         symmetric_chains=symmetric_chains)
         pose = backend.restrained_minimize(pose, design_positions, second_shell,
                                            allow_ligand_torsions=True,
-                                           ligand_rigid_body=False, chain=chain)
+                                           ligand_rigid_body=False, chain=chain,
+                                           symmetric_chains=symmetric_chains)
         out[st] = backend.score_terms(pose)
     assert_consistent(out)
     return out
@@ -174,6 +179,15 @@ def run(ctx):
     design_positions = ctx["masks"]["recognition_mask"]
     second_shell = ctx["masks"].get("transduction_mask", ())
     chain = ctx["states"].get("chain", "A")
+    # every protein subunit gets the design: these scaffolds work as homodimers and the pocket
+    # exists in each subunit. Detected from the DNA-compatible template if structure did not say.
+    protein_chains = ctx["states"].get("protein_chains")
+    if not protein_chains:
+        try:
+            from .structure import load_assembly, classify_chains
+            protein_chains = [c.id for c in classify_chains(load_assembly(templates["X_D"]))[0]]
+        except Exception:
+            protein_chains = [chain]
     # S_release is stored RAW here (topology_sign=+1). The topology sign is applied exactly once,
     # in rank.apply_gates via release_sign(). Applying it in both places squared it and a
     # corepressor lost its inversion, (-1)^2 = +1 (GPT-5.6).
@@ -184,7 +198,8 @@ def run(ctx):
         # A bare dict (tests) is used as-is.
         residues = cand["residues"] if isinstance(cand, dict) and "residues" in cand else cand
         try:
-            terms = build_six(backend, residues, templates, design_positions, second_shell, chain)
+            terms = build_six(backend, residues, templates, design_positions, second_shell, chain,
+                              symmetric_chains=protein_chains)
         except Exception as exc:
             # a candidate whose states could not be built is dropped, never zero-filled:
             # a zero here reads as "neutral energy" and sails through every gate.

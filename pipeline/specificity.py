@@ -162,4 +162,6 @@ def run(ctx):
                          native_resname=ctx["states"].get("effector_resname"),
                          native_smiles=rt.get("native_smiles"),
                          method=method)
-    return {"specificity": out, "preserve_native_response": preserve}
+    # key must match what allotf.py STAGES declares this stage produces, or the contract check
+    # fails and rank never sees the scores
+    return {"specificity_scores": out, "preserve_native_response": preserve}

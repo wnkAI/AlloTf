@@ -140,7 +140,7 @@ class PyRosettaBackend:
     # ---- restrained minimisation -------------------------------------------------------------
     def restrained_minimize(self, pose, design_positions, second_shell_positions=(),
                             allow_ligand_torsions=True, ligand_rigid_body=False,
-                            freeze_dna=True, chain="A"):
+                            freeze_dna=True, chain="A", symmetric_chains=None):
         """Backbone frozen, jumps frozen, chi free only where we say.
 
         Two traps this guards against:
@@ -149,6 +149,10 @@ class PyRosettaBackend:
           * free ligand rigid body -> the ligand re-docks itself in each state, so the double
             difference silently reports a docking result instead of an allosteric one.
         Ligand INTERNAL torsions stay free: a rigid ligand is unphysical strain.
+
+        symmetric_chains must match what mutate_and_repack used. Opening chi on one subunit only,
+        after mutating both, minimises half the dimer against a frozen half - the interface energy
+        then reports that asymmetry rather than the design.
         """
         from pyrosetta.rosetta.core.kinematics import MoveMap
         from pyrosetta.rosetta.protocols.minimization_packing import MinMover
@@ -157,8 +161,10 @@ class PyRosettaBackend:
         mm.set_bb(False)
         mm.set_chi(False)
         mm.set_jump(False)                       # ligand + DNA rigid bodies stay put
-        for rn in list(design_positions) + list(second_shell_positions):
-            mm.set_chi(self._pose_index(pose, rn, chain), True)
+        chains = list(symmetric_chains) if symmetric_chains else [chain]
+        for ch in chains:
+            for rn in list(design_positions) + list(second_shell_positions):
+                mm.set_chi(self._pose_index(pose, rn, ch), True)
         if allow_ligand_torsions:
             for i in range(1, pose.total_residue() + 1):
                 if pose.residue(i).is_ligand():

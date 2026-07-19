@@ -29,12 +29,15 @@ class MockBackend:
         self._state = os.path.basename(pdb).replace(".pdb", "")
         return dict(template=self._state, seq=None, movemap=None)
 
-    def mutate_and_repack(self, pose, sequence, design_positions, repack=(), chain="A"):
+    def mutate_and_repack(self, pose, sequence, design_positions, repack=(), chain="A",
+                          symmetric_chains=None):
         self.calls.append(("mutate", pose["template"], tuple(sorted(sequence.items()))))
-        return dict(pose, seq=tuple(sorted(sequence.items())))
+        return dict(pose, seq=tuple(sorted(sequence.items())),
+                    chains=tuple(symmetric_chains or [chain]))
 
     def restrained_minimize(self, pose, design_positions, second_shell=(),
-                            allow_ligand_torsions=True, ligand_rigid_body=False, chain="A"):
+                            allow_ligand_torsions=True, ligand_rigid_body=False, chain="A",
+                            symmetric_chains=None):
         if ligand_rigid_body:
             raise NotImplementedError("ligand rigid body must stay frozen")
         mm = dict(bb=False, jump=False, chi=True, ligand_torsions=allow_ligand_torsions)
