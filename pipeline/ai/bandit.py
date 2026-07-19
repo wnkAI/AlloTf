@@ -25,10 +25,12 @@ class ThompsonBandit:
         cand_samples, meta = {}, {}
         for i, c in enumerate(candidates):
             surfaces = self.gp.sample_surfaces(c["mech"], c["mut"], self.conc, self.time,
-                                               c["scaffold"], self.n_samples, self.seed + i)
+                                               c["scaffold"], self.n_samples, self.seed + i,
+                                               cid=c["candidate_id"])
             cand_samples[c["candidate_id"]] = [
                 fl.objectives(fl.phenotypes(self.conc, self.time, F)) for F in surfaces]
-            ph = self.gp.predict_phenotypes(c["mech"], c["mut"], self.conc, self.time, c["scaffold"])
+            ph = self.gp.predict_phenotypes(c["mech"], c["mut"], self.conc, self.time,
+                                            c["scaffold"], cid=c["candidate_id"])
             meta[c["candidate_id"]] = {"sequence": c.get("sequence", ""), "basal": ph["basal"],
                                        "pred": ph}
         return cand_samples, meta

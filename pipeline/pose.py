@@ -78,15 +78,30 @@ def native_ligand_mol(pdb_path, ligand_resname):
 
 
 def _template_with_bonds(native_pdb_mol, native_smiles):
-    """PDB has no bond orders. Assign them from the known SMILES, or the MCS is nonsense."""
+    """PDB has no bond orders. Assign them from the known SMILES, or the MCS is nonsense.
+
+    The molecule then MUST be sanitised. native_ligand_mol reads with sanitize=False - it has to,
+    because a bond-order-free PDB block cannot be sanitised - so ring perception is never
+    initialised. rdFMCS with ringMatchesRingOnly/completeRingsOnly consults exactly that ring
+    information, finds none, and silently degrades the match: GlcNAc vs IPTG, which share a whole
+    pyranose ring (MCS 10 atoms as plain SMILES), came back as 2 atoms and the pose was routed to
+    docking with the misleading message "too dissimilar to the native effector".
+    """
     ref = Chem.MolFromSmiles(native_smiles)
     if ref is None:
         raise ValueError("unparsable native SMILES: %s" % native_smiles)
     try:
-        return AllChem.AssignBondOrdersFromTemplate(ref, native_pdb_mol)
+        m = AllChem.AssignBondOrdersFromTemplate(ref, native_pdb_mol)
     except Exception as exc:
         raise ValueError("could not map native SMILES onto the crystal ligand (%s). The SMILES "
                          "and the PDB chemical component disagree." % exc)
+    try:
+        Chem.SanitizeMol(m)               # initialises ring info, aromaticity, valences
+    except Exception as exc:
+        raise ValueError("crystal ligand could not be sanitised after bond-order assignment (%s): "
+                         "ring perception would be missing and every MCS against it would be "
+                         "meaningless." % exc)
+    return m
 
 
 def mcs_transfer(target_smiles, template_mol, n_poses=10, seed=0xA110):
@@ -126,24 +141,30 @@ def mcs_transfer(target_smiles, template_mol, n_poses=10, seed=0xA110):
     if not len(cids):
         raise RuntimeError("ETKDG produced no conformers for %s" % target_smiles)
 
-    kept = []
+    kept, failures = [], []
     for cid in cids:
-        try:
-            AllChem.ConstrainedEmbed(tgt, template_mol, coreConfId=-1, randomseed=seed + cid,
-                                     getForceField=AllChem.UFFGetMoleculeForceField)
-        except Exception:
-            pass
+        # Put the shared atoms ON the crystal coordinates, then FIX them and relax the rest.
+        # AddExtraPoint + AddDistanceConstraint changes the force field's point count without
+        # reinitialising it, so Minimize dies on its own size check - and the earlier
+        # `except Exception: pass` hid that behind "no conformer survived".
+        c = tgt.GetConformer(cid)
+        for ti, p in cmap.items():
+            c.SetAtomPosition(ti, p)
         ff = AllChem.UFFGetMoleculeForceField(tgt, confId=cid)
         if ff is None:
+            failures.append("no UFF force field for conformer %d" % cid)
             continue
-        # pin the MCS atoms to the crystal coordinates, relax everything else
         for ti in cmap:
-            idx = ff.AddExtraPoint(cmap[ti].x, cmap[ti].y, cmap[ti].z, fixed=True) - 1
-            ff.AddDistanceConstraint(idx, ti, 0, 0.05, 100.0)
-        ff.Minimize(maxIts=500)
+            ff.AddFixedPoint(ti)
+        try:
+            ff.Minimize(maxIts=500)
+        except Exception as exc:
+            failures.append("conformer %d: %s" % (cid, str(exc)[:80]))
+            continue
         kept.append((cid, float(ff.CalcEnergy())))
     if not kept:
-        raise RuntimeError("no conformer survived constrained minimisation")
+        raise RuntimeError("no conformer survived constrained minimisation (%d attempted). "
+                           "First failures: %s" % (len(cids), failures[:3]))
 
     kept.sort(key=lambda t: t[1])
     out = _prune(tgt, kept, n_poses)
@@ -225,8 +246,14 @@ def generate_poses(ligand_smiles, state_path, pocket_residues, n_poses=10,
             reason = str(exc)
     else:
         reason = "no native ligand reference supplied"
-    poses, prov = dock_smina(ligand_smiles, state_path,
-                             pocket_center(state_path, pocket_residues), n_poses)
+    try:
+        poses, prov = dock_smina(ligand_smiles, state_path,
+                                 pocket_center(state_path, pocket_residues), n_poses)
+    except RuntimeError as exc:
+        # dock_smina's message asserts the target is "too dissimilar", which is a CLAIM, not
+        # something it measured. Carry the transfer's real reason so the two are not confused -
+        # a sanitisation failure and a genuinely small MCS need completely different fixes.
+        raise RuntimeError("%s\n  MCS transfer was declined because: %s" % (exc, reason))
     return [{"mol": p, "conf_id": 0, "internal_energy": None,
              "provenance": dict(prov, backbone=state_path, transfer_declined=reason)}
             for p in poses]

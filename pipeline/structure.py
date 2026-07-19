@@ -486,6 +486,59 @@ def load_row(tf_name, db_path=None):
     raise KeyError("%s not in %s" % (tf_name, db_path))
 
 
+def resolve_design_positions(holo_pdb, ligand_resname, dbd_range=None, protected=(),
+                             cutoff=5.0, out_json=None):
+    """Read the design positions OFF THE STRUCTURE instead of trusting a hand-typed list.
+
+    A user who downloads this should not have to know which residues line the pocket. The contact
+    shell is measured from the deposited effector, then the readout domain (DBD) and any residues
+    declared untouchable are removed - so the same command works on a scaffold nobody has curated.
+
+    -> (positions, report). The report records what was found and what was excluded, and is written
+    to out_json so a run can be audited later.
+    """
+    model = load_assembly(holo_pdb)
+    lig = [a for ch in model for r in ch
+           if r.id[0] != " " and r.get_resname().strip().upper() == ligand_resname.upper()
+           for a in r if a.element != "H"]
+    if not lig:
+        raise RuntimeError("effector %s not found in %s: cannot resolve the pocket"
+                           % (ligand_resname, os.path.basename(holo_pdb)))
+    L = np.array([a.coord for a in lig])
+
+    shell = set()
+    for ch in classify_chains(model)[0]:
+        for r in ch:
+            if r.id[0] != " ":
+                continue
+            for a in r:
+                if a.element == "H":
+                    continue
+                if np.linalg.norm(L - np.array(a.coord), axis=1).min() < cutoff:
+                    shell.add(int(r.id[1]))
+                    break
+
+    excluded_dbd = set()
+    if dbd_range:
+        lo, hi = int(dbd_range[0]), int(dbd_range[1])
+        excluded_dbd = {p for p in shell if lo <= p <= hi}     # the readout is never redesigned
+    excluded_prot = {int(p) for p in (protected or ())} & shell
+    positions = sorted(shell - excluded_dbd - excluded_prot)
+
+    if not positions:
+        raise RuntimeError("no designable pocket residue survived: shell=%d, DBD-excluded=%d, "
+                           "protected-excluded=%d" % (len(shell), len(excluded_dbd),
+                                                      len(excluded_prot)))
+    report = {"source": os.path.basename(holo_pdb), "ligand": ligand_resname, "cutoff": cutoff,
+              "contact_shell": sorted(shell), "excluded_dbd": sorted(excluded_dbd),
+              "excluded_protected": sorted(excluded_prot), "design_positions": positions}
+    if out_json:
+        os.makedirs(os.path.dirname(os.path.abspath(out_json)), exist_ok=True)
+        with open(out_json, "w") as f:
+            json.dump(report, f, indent=2)
+    return positions, report
+
+
 def load_scaffold_meta(tf, path=None):
     """Per-scaffold parameters (effector residue, DBD boundary, pocket positions) from
     config/scaffolds.yaml.
@@ -538,7 +591,22 @@ def run(ctx):
     holo = fetch_assembly(pick["holo"], out_dir)
     dna = fetch_assembly(pick["dna"], out_dir)
 
-    design_positions = [int(p) for p in (meta.get("design_positions") or ())]
+    # Design positions are RESOLVED FROM THE STRUCTURE by default. A hand-typed list in the config
+    # is treated as an override and recorded as such - nobody downloading this should need to know
+    # which residues line a pocket they have never seen.
+    protected = [int(r) for r in (meta.get("protected_native_trigger") or [])]
+    resolved, pocket_report = resolve_design_positions(
+        holo, meta["effector_resname"], dbd_range=meta.get("dbd_range"), protected=protected,
+        cutoff=float(meta.get("pocket_cutoff", 5.0)),
+        out_json=os.path.join(ctx["out_dir"], "resolved_design_positions.json"))
+    declared = [int(p) for p in (meta.get("design_positions") or ())]
+    if declared:
+        design_positions = declared
+        pocket_report["override"] = {"declared": declared,
+                                     "not_in_resolved_shell": sorted(set(declared) - set(resolved)),
+                                     "resolved_but_unused": sorted(set(resolved) - set(declared))}
+    else:
+        design_positions = resolved
     st = prepare(tf, holo, dna, out_dir,
                  design_positions=design_positions,
                  effector_resname=meta["effector_resname"],

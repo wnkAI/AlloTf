@@ -44,20 +44,32 @@ plasmids instead of hundreds.
 
 ## The learner
 
-A **mechanism-conditioned hierarchical Gaussian-process contextual bandit** — reinforcement
-learning and active learning in one, not deep RL and not hundreds of training points. It learns the
-raw fluorescence surface
+A **scaffold-specific structured Gaussian-process contextual bandit** — reinforcement learning and
+active learning in one, not deep RL and not hundreds of training points. It learns the raw
+fluorescence surface
 
 ```
-(sequence, PhysAllo mechanism features, log c, t)  →  F(c, t)
+(candidate, PhysAllo mechanism features, log c, t)  →  F(c, t)
 ```
 
 directly, without first fitting rate/lag constants (unstable at a 6 h read cadence). B, fold
 induction, EC50, the first-response time bin, and response AUC are read off the predicted surface.
 Selection is multi-objective posterior Thompson sampling — no fixed weighted score — with basal
-leak as a hard constraint. Scaffolds share the mechanism weights but each carries a
-scaffold-specific random effect, `f_global(mechanism) + f_scaffold`, so TtgR is one task among
-several rather than a stand-in for every TF.
+leak as a hard constraint.
+
+**What this is not, yet.** It is NOT a cross-scaffold model. A project holds one scaffold, the GP
+is fitted on that project's own plates, and nothing is shared between projects. Cross-scaffold
+mechanism transfer is a *result to be earned* once several scaffolds have been run — a global
+feedback library and a kernel of the form
+`K_mechanism x K_dose x K_time + K_scaffold` — not a property this code already has. Claiming it
+before the data exist would be claiming a capability the numbers never had.
+
+**The statistical unit is the candidate, not the well.** Eight sequences read at 5 doses and 7
+timepoints give 280 measurements but still only **n_sequence = 8**. The kernel is therefore
+structured as `K_candidate x K_dose x K_time`, with candidate-level correlation and replicate
+noise separated, and model selection uses **candidate-grouped** cross-validation. A plain RBF over
+one concatenated vector would treat repeated reads of one protein as independent evidence about
+sequence.
 
 ## Commands
 
