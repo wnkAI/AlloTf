@@ -83,10 +83,15 @@ def run_stage(name, ctx, requires, produces):
     out = fn(ctx)
     if out is None:
         raise RuntimeError("stage '%s' returned None; it must return the updated ctx" % name)
-    absent = [k for k in produces if k not in out or out[k] is None]
+    # MERGE, never replace: a stage returns only what it produces (structure.run returns states +
+    # residue_mapping, allostery.run returns template + masks). Replacing ctx with that return value
+    # silently drops everything upstream, and the next stage fails on inputs that were computed.
+    merged = dict(ctx)
+    merged.update(out)
+    absent = [k for k in produces if k not in merged or merged[k] is None]
     if absent:
         raise RuntimeError("stage '%s' did not produce %s" % (name, absent))
-    return out
+    return merged
 
 
 def mechanism_features(cid, cand, cstate, masks):
@@ -122,35 +127,44 @@ def finalize_design(ctx, project, n_initial):
 
     ranked = ctx["ranked"]
     order = ranked.get("final") or ranked.get("front") or []
-    picked = order[:n_initial]
+    if not order:
+        raise RuntimeError("rank produced no candidate to seed the project")
     cand_states = ctx.get("candidate_states", {})
     masks = ctx.get("masks", {})
     scaffold = ctx["scaffold"]
     cref = float(ctx.get("cfg", {}).get("design", {}).get("cref", 1.0))
     conc = [f * cref for f in DOSE_FRACTIONS]
 
+    # EVERY candidate that survived the physical gates enters the project pool. Only the first
+    # n_initial go on the first plate. Storing just the tested eight would leave select-next with
+    # an empty untested pool, so round two could never propose anything.
     candidates = {}
     feat_rows = []
-    for rec in picked:
+    for rec in order:
         cid = rec.get("id") or rec.get("candidate_id")
         cand = ctx["candidates"].get(cid, rec)
         mech, mut = mechanism_features(cid, cand, cand_states.get(cid, rec), masks)
-        candidates[cid] = {"sequence": cand.get("sequence", rec.get("sequence", "")),
-                           "mech": mech, "mut": mut, "scaffold": scaffold}
-        feat_rows.append(dict(candidate_id=cid, sequence=candidates[cid]["sequence"],
+        candidates[cid] = {
+            "sequence": cand.get("full_sequence") or cand.get("sequence", ""),
+            "design_site_sequence": cand.get("design_site_sequence", cand.get("sequence", "")),
+            "mech": mech, "mut": mut, "scaffold": scaffold}
+        feat_rows.append(dict(candidate_id=cid,
+                              design_site_sequence=candidates[cid]["design_site_sequence"],
                               **{("mech_" + k): v for k, v in mech.items()},
                               **{("mut_" + k): v for k, v in mut.items()}))
 
-    if not candidates:
-        raise RuntimeError("rank produced no candidate to seed the project")
-
+    initial_ids = list(candidates)[:n_initial]
     cl.init_project(project, candidates, conc, TIME_POINTS,
-                    basal_max=ctx.get("cfg_scoring", {}).get("basal_max"))
-    _write_fasta(os.path.join(project, "initial_%d.fasta" % len(candidates)), candidates)
-    _write_plate_layout(os.path.join(project, "initial_%d_plate_layout.csv" % len(candidates)),
-                        list(candidates), conc)
-    _write_features(os.path.join(project, "initial_%d_features.csv" % len(candidates)), feat_rows)
-    print("\ndesign done -> %d plasmids, plate layout and features in %s" % (len(candidates), project))
+                    basal_max=ctx.get("cfg_scoring", {}).get("basal_max"),
+                    initial_ids=initial_ids)
+
+    initial = {cid: candidates[cid] for cid in initial_ids}
+    _write_fasta(os.path.join(project, "initial_%d.fasta" % len(initial)), initial)
+    _write_plate_layout(os.path.join(project, "initial_%d_plate_layout.csv" % len(initial)),
+                        initial_ids, conc)
+    _write_features(os.path.join(project, "initial_%d_features.csv" % len(initial)), feat_rows)
+    print("\ndesign done -> %d plasmids on plate 1, %d candidates in the pool, in %s"
+          % (len(initial), len(candidates), project))
     return 0
 
 
@@ -161,16 +175,21 @@ def _write_fasta(path, candidates):
 
 
 def _write_plate_layout(path, cids, conc):
+    """One physical well per (candidate, concentration, replicate); every timepoint is a REPEATED
+    READ of that same well. Incrementing the well inside the time loop would demand
+    candidates x doses x times x reps wells (560 for 8 candidates) instead of 80 — the whole point
+    of a time course is that it costs reads, not plasmids or wells."""
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["candidate_id", "concentration", "time_h", "replicate", "well"])
         well = 0
         for cid in cids:
             for c in conc:
-                for t in TIME_POINTS:
-                    for rep in range(1, REPLICATES + 1):
-                        w.writerow([cid, c, t, rep, "W%04d" % well])
-                        well += 1
+                for rep in range(1, REPLICATES + 1):
+                    label = "W%04d" % well
+                    well += 1
+                    for t in TIME_POINTS:
+                        w.writerow([cid, c, t, rep, label])
 
 
 def _write_features(path, rows):

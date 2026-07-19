@@ -34,11 +34,14 @@ def load(project):
         return json.load(f)
 
 
-def init_project(project, candidates, conc, time, basal_max=None):
-    """candidates: {cid: {sequence, mech, mut, scaffold}} from the design stage.
+def init_project(project, candidates, conc, time, basal_max=None, initial_ids=None):
+    """candidates: {cid: {sequence, mech, mut, scaffold}} - the WHOLE pool that passed the physical
+    gates, not just the first plate. initial_ids marks which of them go on plate 1; the rest stay in
+    the project as the untested pool select-next draws round two from.
     conc / time: the plate grid every candidate is measured on. -> the saved state."""
     os.makedirs(project, exist_ok=True)
     state = {"candidates": candidates,
+             "initial_ids": list(initial_ids) if initial_ids else list(candidates),
              "observations": [],
              "grid": {"conc": [float(c) for c in conc], "time": [float(t) for t in time]},
              "basal_max": basal_max}
@@ -51,6 +54,7 @@ def ingest_plate(project, plate_csv):
 
     A candidate on the plate but not in the project (e.g. WT) is skipped for training - WT is a
     reference, not a design point. -> summary dict."""
+    from . import fluorescence as fl
     state = load(project)
     surfaces, background, wt_id = eio.read_plate(plate_csv)
     added, skipped = 0, []
@@ -59,17 +63,22 @@ def ingest_plate(project, plate_csv):
         if cand is None:
             skipped.append(cid)
             continue
-        conc, time, F = np.asarray(s["conc"]), np.asarray(s["time"]), np.asarray(s["F"]) - background
+        # same cleaning path as the readouts: per-(c,t) empty-vector subtraction, sorted grid
+        conc, time, F = fl.clean(s["conc"], s["time"], s["F"],
+                                 background=eio.background_for(background, s))
         for i in range(len(conc)):
             for j in range(len(time)):
                 state["observations"].append({
                     "cid": cid, "mech": cand["mech"], "mut": cand["mut"],
                     "scaffold": cand["scaffold"],
                     "conc": float(conc[i]), "time": float(time[j]),
-                    "F": float(max(F[i, j], 0.0))})
+                    "F": float(F[i, j])})
                 added += 1
     _save(project, state)
-    return {"added": added, "background": background, "wt_id": wt_id,
+    bg_scalar = background.get("scalar", 0.0) if isinstance(background, dict) else float(background)
+    bg_mode = ("surface" if isinstance(background, dict) and background.get("surface") is not None
+               else "scalar")
+    return {"added": added, "background": bg_scalar, "background_mode": bg_mode, "wt_id": wt_id,
             "skipped": skipped, "total_observations": len(state["observations"])}
 
 

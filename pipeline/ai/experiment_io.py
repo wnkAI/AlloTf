@@ -71,11 +71,23 @@ def read_plate(path, empty_vector_ids=("empty", "empty_vector", "EV"),
             raise ValueError("bad numeric field in row %s: %s" % (row, exc))
         grouped[cid][(c, t)].append(fl)
 
-    ev = [cid for cid in grouped if cid in empty_vector_ids]
-    background = 0.0
-    if ev:
-        vals = [v for cid in ev for vs in grouped[cid].values() for v in vs]
-        background = float(np.mean(vals)) if vals else 0.0
+    # empty vector -> a per-(c,t) background SURFACE when its grid is complete. Inducer
+    # autofluorescence depends on dose and the plate drifts with time; one averaged scalar removes
+    # neither. The scalar mean is kept only as a fallback for an incomplete control grid.
+    ev_ids = [cid for cid in grouped if cid in empty_vector_ids]
+    background = {"surface": None, "scalar": 0.0}
+    if ev_ids:
+        merged = defaultdict(list)
+        for cid in ev_ids:
+            for key, vals in grouped[cid].items():
+                merged[key].extend(vals)
+        flat = [v for vals in merged.values() for v in vals]
+        background["scalar"] = float(np.mean(flat)) if flat else 0.0
+        try:
+            bc, bt, BF, _, _ = _surface(merged, "empty-vector")
+            background["surface"] = {"conc": bc, "time": bt, "F": BF}
+        except ValueError:
+            pass          # incomplete control grid: fall back to the scalar
 
     wt_id = next((cid for cid in grouped if cid in wt_ids), None)
 
@@ -90,12 +102,26 @@ def read_plate(path, empty_vector_ids=("empty", "empty_vector", "EV"),
     return surfaces, background, wt_id
 
 
+def background_for(background, surface):
+    """The empty-vector background to subtract from ONE candidate surface: the per-(c,t) control
+    matrix when its grid matches, otherwise the scalar mean."""
+    if not isinstance(background, dict):
+        return background
+    bg = background.get("surface")
+    if (bg is not None
+            and np.array_equal(np.asarray(bg["conc"]), np.asarray(surface["conc"]))
+            and np.array_equal(np.asarray(bg["time"]), np.asarray(surface["time"]))):
+        return np.asarray(bg["F"])
+    return background.get("scalar", 0.0)
+
+
 def readouts(path, **kw):
     """Convenience: plate CSV -> {candidate_id: phenotypes dict} with background subtracted."""
     from . import fluorescence as fl
     surfaces, background, wt_id = read_plate(path, **kw)
     out = {}
     for cid, s in surfaces.items():
-        conc, time, F = fl.clean(s["conc"], s["time"], s["F"], background=background)
+        conc, time, F = fl.clean(s["conc"], s["time"], s["F"],
+                                 background=background_for(background, s))
         out[cid] = fl.phenotypes(conc, time, F)
     return {"phenotypes": out, "background": background, "wt_id": wt_id}

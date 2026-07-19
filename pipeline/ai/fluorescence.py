@@ -43,7 +43,17 @@ def clean(conc, time, F, background=0.0):
                          % (len(conc), len(time), F.shape))
     ci = np.argsort(conc)
     ti = np.argsort(time)
-    return conc[ci], time[ti], np.clip(F[np.ix_(ci, ti)] - background, 0.0, None)
+    Fs = F[np.ix_(ci, ti)]
+    bg = np.asarray(background, float)
+    if bg.ndim == 0:
+        Fc = Fs - float(bg)
+    else:
+        # a per-(c,t) empty-vector surface: inducer autofluorescence varies with dose AND the plate
+        # drifts with time, so a single averaged scalar cannot remove either
+        if bg.shape != F.shape:
+            raise ValueError("background surface %s does not match F %s" % (bg.shape, F.shape))
+        Fc = Fs - bg[np.ix_(ci, ti)]
+    return conc[ci], time[ti], np.clip(Fc, 0.0, None)
 
 
 def _hill(c, bottom, top, ec50, n):
@@ -62,8 +72,10 @@ def dose_ec50(conc, response):
     pos = conc > 0
     if not _SCIPY or pos.sum() < 3:
         return None
+    # response here is INDUCTION over the own-time control, so its floor sits near zero; judge it
+    # by span and by having a real positive rise, not by a max/min fold ratio.
     span = float(response.max() - response.min())
-    if span < 1e-9 or (response.max() / max(response.min(), 1e-9)) < MIN_FOLD:
+    if span < 1e-9 or response.max() <= 0:
         return None
     cpos = conc[pos]
     lo = [response.min() - span, response.min(), cpos.min() * 1e-2, 0.5]
@@ -80,34 +92,47 @@ def dose_ec50(conc, response):
 
 
 def phenotypes(conc, time, F, on_fraction=ON_FRACTION):
-    """Robust readouts from a cleaned surface. Works on measured OR GP-predicted F.
+    """Robust readouts, normalised against the SAME-TIMEPOINT zero-dose control.
 
-    -> dict(basal, max_fold, EC50, t_on_bin, auc, responder, note)
-    responder=False (with a note) when the surface never rises MIN_FOLD over basal — its EC50 and
-    t_on_bin are then None rather than invented.
+    Cells keep growing and reporter protein keeps accumulating, so F(0,t) rises on its own.
+    Dividing by one time-averaged basal scores that drift as induction. Everything below is
+    computed against F(0,t) at the matching t:
+
+        dF(c,t)   = F(c,t) - F(0,t)
+        fold(c,t) = (F(c,t)+eps) / (F(0,t)+eps)
+
+    -> dict(basal, basal_mean, max_fold, EC50, t_on_bin, auc, responder, note)
+    responder=False (with a note) when nothing ever rises MIN_FOLD over its own-time control; EC50
+    and t_on_bin are then None rather than invented.
     """
     conc, time, F = np.asarray(conc, float), np.asarray(time, float), np.asarray(F, float)
-    zero = np.isclose(conc, 0.0)
-    basal = float(F[zero].mean()) if zero.any() else float(F[conc.argmin()].mean())
-    basal_eff = max(basal, 1e-6)
-    max_fold = float(F.max() / basal_eff)
+    zero_i = int(np.argmin(conc))            # the zero dose (or the lowest one measured)
+    baseline = F[zero_i]                     # per-timepoint control trace, NOT a scalar
+    eps = 1e-6
 
+    delta = F - baseline[None, :]
+    fold_ct = (F + eps) / (baseline[None, :] + eps)
+    max_fold = float(fold_ct.max())
     responder = max_fold >= MIN_FOLD
-    top = F[conc.argmax()]                  # top-dose time course
-    ec50 = dose_ec50(conc, F[:, -1]) if responder else None    # endpoint dose-response
+
+    top_i = int(np.argmax(conc))
+    dtop = delta[top_i]                      # top-dose induction over its own-time control
+    # dose-response on the endpoint INDUCTION, so growth cancels out of EC50 too
+    ec50 = dose_ec50(conc, delta[:, -1]) if responder else None
 
     t_on = None
     if responder:
-        span = top.max() - basal
+        span = float(dtop.max())
         if span > 0:
-            thr = basal + on_fraction * span
-            above = np.where(top >= thr)[0]
+            above = np.where(dtop >= on_fraction * span)[0]
             if len(above):
                 t_on = float(time[above[0]])
 
-    auc = float(_trapz(np.clip(top - basal, 0, None), time)) if len(time) > 1 else 0.0
+    auc = float(_trapz(np.clip(dtop, 0.0, None), time)) if len(time) > 1 else 0.0
 
-    return {"basal": basal, "max_fold": max_fold, "EC50": ec50,
+    return {"basal": float(baseline[-1]),          # leak at the last read (steady state)
+            "basal_mean": float(baseline.mean()),
+            "max_fold": max_fold, "EC50": ec50,
             "t_on_bin": t_on, "auc": auc, "responder": responder,
             "note": "" if responder else "non-responder (max_fold %.2f < %.2f)" % (max_fold, MIN_FOLD)}
 

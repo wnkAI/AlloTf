@@ -42,6 +42,34 @@ class DesignBackend(ABC):
         return False
 
 
+def _wt_chain_residues(pdb_path, chain_id):
+    """-> [(resnum, resname)] of the design chain, in sequence order.
+
+    Goes through load_assembly, not next(iter(structure)): a biological assembly stored as several
+    MODEL blocks would otherwise collapse to its first chain.
+    """
+    from .structure import load_assembly
+    from .physallo.aa_filter import one
+
+    model = load_assembly(pdb_path)
+
+    def protein_len(c):
+        return sum(1 for r in c if r.id[0] == " " and one(r.get_resname().upper()))
+
+    chain = {c.id: c for c in model}.get(chain_id)
+    if chain is None or protein_len(chain) == 0:
+        chain = max(model, key=protein_len)
+    return [(r.id[1], r.get_resname().upper()) for r in chain
+            if r.id[0] == " " and one(r.get_resname().upper())]
+
+
+def _apply_residues(wt_chain, residues):
+    """WT chain with the designed positions substituted -> full-length one-letter sequence, i.e.
+    something that can actually be ordered as a gene."""
+    from .physallo.aa_filter import one
+    return "".join(one(residues.get(num, wt)) or "X" for num, wt in wt_chain)
+
+
 class PhysAlloDesignBackend(DesignBackend):
     """THE production designer: physics-grounded, multistate, allostery-aware.
 
@@ -108,6 +136,7 @@ class PhysAlloDesignBackend(DesignBackend):
 
         wt_e = efn(space.wt_state(np.random.RandomState(0)))
         clash_margin = dcfg.get("fast_clash_margin", 25.0)
+        wt_chain = _wt_chain_residues(scaffold, chain)
 
         out = []
         for c in raw:
@@ -116,7 +145,11 @@ class PhysAlloDesignBackend(DesignBackend):
             residues = {p: c["state"][p][0] for p in c["state"]}
             out.append({
                 "candidate_id": "cand_%04d" % len(out),
-                "sequence": c["seq"],
+                # the pocket string is what the search optimises; the FULL chain is what gets
+                # synthesised. Emitting only the 11-mer would hand the wet lab an unorderable gene.
+                "design_site_sequence": c["seq"],
+                "full_sequence": _apply_residues(wt_chain, residues),
+                "sequence": _apply_residues(wt_chain, residues),
                 "mutations": c["mutations"],           # [(pos, wt, mut)] relative to WT
                 "residues": residues,                  # {resnum: resname} for state_builder
                 "rotamers": {p: c["state"][p][1] for p in c["state"]},
