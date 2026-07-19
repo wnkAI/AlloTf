@@ -75,40 +75,138 @@ def decoy_tier(name):
     return "mandatory" if str(name).startswith(MANDATORY_PREFIXES) else "secondary"
 
 
-def close_analogues(target_smiles, n=4, db_path=None):
-    """The n nearest ligands in the aTF ligand database by ECFP Tanimoto.
+# Weights for the combined graph similarity used to CHOOSE decoys. Graph similarity is not binding
+# selectivity - it only answers "which molecules are the dangerous chemical neighbours worth
+# comparing against". Selectivity itself is decided by structure-based scoring on the same
+# candidate protein.
+W_ECFP, W_MCS, W_PHARM = 0.60, 0.25, 0.15
+MIN_ECFP, MIN_MCS = 0.35, 0.50          # pre-filter: either route into "close enough to matter"
+# ...but neither metric alone may carry a molecule through. Measured on tetracycline, a
+# cholesterol-CoA derivative passed on MCS=0.50 with ECFP=0.09: a large molecule can accumulate
+# ring-system overlap while sharing no local chemistry at all. The combined score has to agree.
+MIN_COMBINED = 0.30
 
-    These are what a redesigned pocket is most likely to confuse with the target, so they belong in
-    the mandatory tier. useChirality=True: RDKit fingerprints ignore stereochemistry by default,
-    and D/L pairs would otherwise come back as the same molecule.
+
+def _ecfp_similarity(a, b):
+    """ECFP4 Tanimoto. useChirality=True is not optional: RDKit fingerprints ignore stereochemistry
+    by default, so enantiomers would come back identical - and a stereoisomer is precisely the decoy
+    a redesigned pocket is most likely to confuse with the target."""
+    from rdkit.Chem import AllChem, DataStructs
+    gen = AllChem.GetMorganGenerator(radius=2, fpSize=2048, includeChirality=True)
+    return float(DataStructs.TanimotoSimilarity(gen.GetFingerprint(a), gen.GetFingerprint(b)))
+
+
+def _mcs_similarity(a, b, timeout=5):
+    """Shared-core coverage: 2*N_MCS / (N_a + N_b) over heavy atoms.
+
+    Catches the case ECFP under-rates - two molecules built on the same scaffold that differ only
+    in substituents (tetracycline vs doxycycline).
+    """
+    from rdkit.Chem import rdFMCS
+    na, nb = a.GetNumHeavyAtoms(), b.GetNumHeavyAtoms()
+    if not na or not nb:
+        return 0.0
+    try:
+        res = rdFMCS.FindMCS([a, b], timeout=timeout, ringMatchesRingOnly=True,
+                             completeRingsOnly=True)
+    except Exception:
+        return 0.0
+    if res.canceled or not res.numAtoms:
+        return 0.0
+    return float(2 * res.numAtoms) / float(na + nb)
+
+
+def _pharmacophore_similarity(a, b):
+    """Overlap of functional features: donors, acceptors, aromatic rings, +/- centres, hydrophobes.
+
+    Guards the failure ECFP and MCS share - a carbon skeleton that looks similar while the groups
+    that actually make the interactions are different.
+    """
+    from rdkit import Chem
+    feats = {
+        "donor": Chem.MolFromSmarts("[$([N;!H0]),$([O,S;H1,H2])]"),
+        "acceptor": Chem.MolFromSmarts("[$([O,S;v2]),$([N;v3;!$([N+]);!$(n)]),$([n;+0])]"),
+        "aromatic": Chem.MolFromSmarts("a"),
+        "positive": Chem.MolFromSmarts("[+,$([N;H2&+0][$([C,a]);!$([C,a](=O))]),$([N;H1&+0]([$([C,a]);!$([C,a](=O))])[$([C,a]);!$([C,a](=O))])]"),
+        "negative": Chem.MolFromSmarts("[-,$(C(=O)[O;H1,-]),$(S(=O)(=O)[O;H1,-]),$(P(=O)[O;H1,-])]"),
+        "hydrophobe": Chem.MolFromSmarts("[C;!$(C=O);!$(C#N)]"),
+    }
+    inter = union = 0
+    for patt in feats.values():
+        if patt is None:
+            continue
+        ca = len(a.GetSubstructMatches(patt))
+        cb = len(b.GetSubstructMatches(patt))
+        inter += min(ca, cb)
+        union += max(ca, cb)
+    return float(inter) / float(union) if union else 0.0
+
+
+def graph_similarity(a, b):
+    """-> (combined, {'ecfp','mcs','pharm'}). Combined = 0.60*ECFP + 0.25*MCS + 0.15*pharmacophore.
+
+    Three complementary views, because each alone misleads: ECFP is size-sensitive and over-
+    penalises substitutions on a shared core; MCS can score two molecules with very different
+    charge states as near-identical; pharmacophore alone ignores topology.
+    """
+    e = _ecfp_similarity(a, b)
+    m = _mcs_similarity(a, b)
+    p = _pharmacophore_similarity(a, b)
+    return W_ECFP * e + W_MCS * m + W_PHARM * p, {"ecfp": e, "mcs": m, "pharm": p}
+
+
+def close_analogues(target_smiles, n=4, db_path=None):
+    """The n most dangerous chemical neighbours of the target in the aTF ligand database.
+
+    Pre-filtered on ECFP >= 0.35 OR MCS >= 0.50 (either route into "close enough to matter"), then
+    ranked by the combined graph score. Exact duplicates - salts, solvates, plain protonation
+    variants - are dropped: they are the same molecule and would only inflate the decoy set.
+
+    This selects WHAT to compare. It never decides selectivity, which is measured by docking and
+    scoring each of these on the same candidate protein as the target.
     """
     import csv
     import os
     from rdkit import Chem
-    from rdkit.Chem import AllChem, DataStructs
 
     t = Chem.MolFromSmiles(target_smiles)
     if t is None:
-        return []
+        raise ValueError("target SMILES could not be parsed for analogue selection: %s"
+                         % target_smiles)
     db_path = db_path or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                       "data", "atf_ligand_db.csv")
     if not os.path.exists(db_path):
-        return []
-    gen = AllChem.GetMorganGenerator(radius=2, fpSize=2048, includeChirality=True)
-    tfp = gen.GetFingerprint(t)
+        raise FileNotFoundError(
+            "ligand database %s not found: close analogues are a MANDATORY decoy tier and cannot "
+            "be silently skipped" % db_path)
+
+    from utils.standardize_ligand import same_molecule
     scored = []
     with open(db_path) as f:
         for row in csv.DictReader(f):
             smi = (row.get("smiles") or "").strip()
-            if not smi or smi == target_smiles:
+            if not smi:
                 continue
             m = Chem.MolFromSmiles(smi)
             if m is None:
                 continue
-            s = DataStructs.TanimotoSimilarity(tfp, gen.GetFingerprint(m))
-            scored.append((s, row.get("ligand") or row.get("name") or smi[:12], smi))
-    scored.sort(reverse=True)
-    return [("analogue_%d_%s" % (i + 1, name), smi) for i, (s, name, smi) in enumerate(scored[:n])]
+            try:
+                if same_molecule(smi, target_smiles):      # salt / solvate / protonation variant
+                    continue
+            except Exception:
+                if smi == target_smiles:
+                    continue
+            combined, parts = graph_similarity(t, m)
+            if (parts["ecfp"] < MIN_ECFP and parts["mcs"] < MIN_MCS) or combined < MIN_COMBINED:
+                continue
+            # the column is native_ligand in atf_ligand_db.csv; reading a non-existent 'ligand'
+            # column silently degraded every analogue name to a SMILES fragment
+            label = (row.get("native_ligand") or row.get("ligand") or row.get("name")
+                     or smi[:12]).strip().replace(" ", "_")
+            scored.append((combined, label, smi, parts))
+    scored.sort(key=lambda x: -x[0])
+    return [("analogue_%d_%s" % (i + 1, name), smi)
+            for i, (c, name, smi, parts) in enumerate(scored[:n])]
 
 
 def default_decoys(target_smiles, native_smiles=None, extra=(), include_metabolites=False):
@@ -133,10 +231,10 @@ def default_decoys(target_smiles, native_smiles=None, extra=(), include_metaboli
         out.append(("native_effector", native_smiles))
     for i, s in enumerate(stereoisomers(target_smiles)):
         out.append(("stereoisomer_%d" % (i + 1), s))
-    try:
-        out.extend(close_analogues(target_smiles))
-    except Exception:
-        pass                       # a missing ligand DB must not break negative design entirely
+    # NOT wrapped in a bare except: close analogues are a MANDATORY tier, and swallowing an RDKit
+    # or database error here would return a confident numeric specificity computed without the very
+    # decoys that matter most - a silent downgrade dressed as a result.
+    out.extend(close_analogues(target_smiles))
     if include_metabolites:
         out.extend(sorted(HOST_METABOLITES.items()))
     out.extend(extra)
@@ -281,8 +379,13 @@ def run(ctx):
     lp = ctx.get("ligand_params") or {}
     bundle_decoys = lp.get("decoys") or {}
     if bundle_decoys:
-        decoys = [(did, d["smiles"]) for did, d in bundle_decoys.items()]
-        decoy_resnames = {did: d["resname"] for did, d in bundle_decoys.items()}
+        # keep the LOGICAL name (native_effector / stereoisomer_2 / analogue_1_...), not the bundle
+        # key (D01). decoy_tier reads the name, so keying on D01 would classify every decoy as
+        # secondary, leave the mandatory tier empty and return specificity=None for every candidate.
+        decoys = [(d.get("decoy_name") or d.get("role") or did, d["smiles"])
+                  for did, d in bundle_decoys.items()]
+        decoy_resnames = {(d.get("decoy_name") or d.get("role") or did): d["resname"]
+                          for did, d in bundle_decoys.items()}
     else:
         decoys = default_decoys(rt.get("target_smiles") or rt.get("smiles"), native_as_decoy)
         decoy_resnames = {}

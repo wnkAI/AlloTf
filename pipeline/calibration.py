@@ -33,6 +33,8 @@ METRIC_SOURCES = {
     "clash_count": lambda r: r.get("clash_count"),
     "template_similarity": lambda r: r.get("template_similarity"),
     "ligand_strain": lambda r: r.get("ligand_strain"),
+    # the specificity gate is written relative to the controls too, so a control must contribute it
+    "S_specificity": lambda r: r.get("S_specificity"),
 }
 
 
@@ -53,8 +55,13 @@ def _replicate_templates(paths, n_structure_pairs):
 
 
 def _score_one(backend, residues, templates, design_positions, second_shell, chain,
-               symmetric_chains, template_ctx):
-    """One control, one replicate -> a feature row shaped like a candidate's."""
+               symmetric_chains, template_ctx, specificity_fn=None, pose_conf=None):
+    """One control, one replicate -> a feature row shaped EXACTLY like a candidate's.
+
+    "Exactly" matters: check_controls runs these rows through apply_gates, which fail-closes on
+    rank.REQUIRED. A row missing S_specificity or pose_confidence is rejected for being incomplete,
+    so the scaffold would fail its own calibration for a plumbing reason and never reach design.
+    """
     terms = build_six(backend, residues, templates, design_positions, second_shell, chain,
                       symmetric_chains=symmetric_chains)
     tot = totals(terms)
@@ -87,6 +94,10 @@ def _score_one(backend, residues, templates, design_positions, second_shell, cha
     il = (terms.get("IL") or {}).get("_pose")
     row["template_similarity"] = (
         template_ctx(backend, il) if il is not None and template_ctx else None)
+    # the gates fail-close on rank.REQUIRED, so a control row must carry the same fields a
+    # candidate does - otherwise the scaffold fails its own calibration for a plumbing reason
+    row["S_specificity"] = specificity_fn(residues, templates) if specificity_fn else None
+    row["pose_confidence"] = pose_conf
     return row
 
 
@@ -123,6 +134,37 @@ def run(ctx):
         from .state_builder import _template_similarity
         return _template_similarity(be, pose, native_contacts, path_resnums, chain)
 
+    # WT's own selectivity, computed the SAME way candidates' is: the specificity gate is expressed
+    # relative to the controls, so without this the threshold has nothing to resolve against.
+    from .specificity import _dock_and_score, default_decoys, decoy_tier
+    rt = ctx.get("route") or {}
+    lp = ctx.get("ligand_params") or {}
+    spec_method = (ctx.get("cfg", {}).get("design") or {}).get("specificity_method", "smina")
+    bundle_decoys = lp.get("decoys") or {}
+    target_smiles = rt.get("target_smiles") or rt.get("smiles")
+    target_resname = (lp.get("target") or {}).get("resname", "TGT")
+
+    def specificity_fn(residues, ctrl_templates):
+        x_i = ctrl_templates.get("X_I")
+        e_t = _dock_and_score(backend, target_smiles, x_i, design_positions, target_resname,
+                              residues, design_positions, second_shell, chain, protein_chains,
+                              spec_method, ctx.get("cfg", {}).get("design") or {})
+        if e_t is None:
+            return None
+        best = None
+        for did, d in bundle_decoys.items():
+            name = d.get("decoy_name") or d.get("role") or did
+            if decoy_tier(name) != "mandatory":
+                continue
+            e = _dock_and_score(backend, d.get("smiles"), x_i, design_positions, d.get("resname"),
+                                residues, design_positions, second_shell, chain, protein_chains,
+                                spec_method, ctx.get("cfg", {}).get("design") or {})
+            if e is not None and (best is None or e < best):
+                best = e
+        return (best - e_t) if best is not None else None
+
+    pose_conf = (ctx.get("poses") or {}).get("confidence")
+
     # WT residues at the design positions, read from the structure itself
     wt = {}
     from .design import _wt_chain_residues
@@ -134,28 +176,45 @@ def run(ctx):
         raise RuntimeError("WT residues absent at design positions %s: cannot build the WT "
                            "controls" % missing)
 
+    # wt_apo and wt_native_holo are the SAME SEQUENCE but must NOT be the same calculation.
+    # wt_native_holo is the scaffold's own working switch and has to be scored with its NATIVE
+    # effector (the crystal pose kept as X_I_lig_native), not with the design target. Scoring both
+    # on the target would put target-ligand numbers into thresholds labelled "native holo", and
+    # every gate anchored on wt_native_holo would then be calibrated against the wrong molecule.
+    native_templates = dict(templates)
+    native_lig = templates.get("X_I_lig_native")
+    if native_lig:
+        native_templates["X_I_lig"] = native_lig
+        # the native effector's DL state has no crystal either; without one the native-holo control
+        # cannot be built as a full six-state record
+        native_templates["X_D_lig"] = templates.get("X_D_lig_native") or native_lig
+    else:
+        raise RuntimeError(
+            "no X_I_lig_native: wt_native_holo must be scored with the scaffold's NATIVE effector. "
+            "pose.run keeps the native crystal under that key - run it before calibration.")
+
     controls_spec = {
-        # wt_apo is the ligand-free reference; its liganded states are built with the target so the
-        # record has the same shape, but only its apo-side metrics are used downstream
-        "wt_apo": wt,
-        "wt_native_holo": wt,
+        "wt_apo": (wt, templates),                    # target-liganded states; apo metrics used
+        "wt_native_holo": (wt, native_templates),     # NATIVE effector - the real positive control
     }
     # declared negative controls, if the scaffold config names their mutations
-    for name, muts in (ctx.get("scaffold_controls") or {}).items():
+    declared = ctx.get("scaffold_controls") or (ctx.get("states") or {}).get("controls") or {}
+    for name, muts in declared.items():
         row = dict(wt)
         row.update({int(k): v for k, v in muts.items()})
-        controls_spec[name] = row
+        controls_spec[name] = (row, native_templates)
 
     n_pairs = int(robust.get("min_structure_pairs", 1) or 1)
     replicates = _replicate_templates(templates, n_pairs)
 
     control_scores, control_metrics, per_control_reps = {}, {}, {}
-    for cname, residues in controls_spec.items():
+    for cname, (residues, ctrl_templates) in controls_spec.items():
         rows = []
-        for rep_templates in replicates:
+        for rep_templates in _replicate_templates(ctrl_templates, n_pairs):
             try:
                 r = _score_one(backend, residues, rep_templates, design_positions, second_shell,
-                               chain, protein_chains, template_ctx)
+                               chain, protein_chains, template_ctx,
+                               specificity_fn=specificity_fn, pose_conf=pose_conf)
             except Exception as exc:
                 raise RuntimeError("control %s could not be scored: %s" % (cname, exc))
             if r is not None:
