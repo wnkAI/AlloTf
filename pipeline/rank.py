@@ -221,14 +221,82 @@ def cluster_diverse(cands, n, key="sequence", min_dist=2):
     return out
 
 
+# integrity terms rank gates on that MUST come from upstream, with who owes them. rank defaults a
+# missing ligand_strain to +inf and a missing pose_confidence to -1, so an absent value does not
+# weaken the ranking - it rejects every candidate while still looking like a strict filter. Better
+# to say which stage did not compute it.
+REQUIRED_UPSTREAM = {
+    "clash_count":         "state_builder: fold clashes in the packed candidate",
+    "template_similarity": "allostery/state_builder: candidate vs the scaffold's native template",
+    "ligand_strain":       "pose/state_builder: internal strain of the placed ligand",
+    "pose_confidence":     "pose: confidence of the target pose used for the liganded states",
+}
+
+
+def assemble_candidate_features(ctx):
+    """The ONE place candidate feature rows are built, from what upstream actually produced.
+
+    Keys here are exactly the names the gates and the Pareto objectives use (E_L_I, ddG_coupling,
+    S_release, S_specificity, template_similarity) - a concept name would silently drop an
+    objective instead of failing.
+    """
+    need = ("candidates", "candidate_states", "ligand_scores", "dna_scores", "specificity_scores")
+    absent_ctx = [k for k in need if not ctx.get(k)]
+    if absent_ctx:
+        raise RuntimeError("cannot assemble candidate features: upstream produced no %s"
+                           % ", ".join(absent_ctx))
+
+    common = (set(ctx["candidates"]) & set(ctx["candidate_states"]) & set(ctx["ligand_scores"])
+              & set(ctx["dna_scores"]) & set(ctx["specificity_scores"]))
+    if not common:
+        raise RuntimeError(
+            "no candidate survived every upstream stage (candidates=%d states=%d ligand=%d "
+            "dna=%d specificity=%d): nothing to rank"
+            % (len(ctx["candidates"]), len(ctx["candidate_states"]), len(ctx["ligand_scores"]),
+               len(ctx["dna_scores"]), len(ctx["specificity_scores"])))
+
+    rows = []
+    for cid in sorted(common):
+        cand, state = ctx["candidates"][cid], ctx["candidate_states"][cid]
+        ligand, dna, spec = (ctx["ligand_scores"][cid], ctx["dna_scores"][cid],
+                             ctx["specificity_scores"][cid])
+        missing = [k for k in REQUIRED_UPSTREAM if state.get(k) is None]
+        if missing:
+            raise RuntimeError(
+                "candidate %s is missing upstream integrity terms %s - these must be COMPUTED, "
+                "never defaulted:\n  %s"
+                % (cid, missing, "\n  ".join("%s <- %s" % (k, REQUIRED_UPSTREAM[k])
+                                             for k in missing)))
+        rows.append({
+            "id": cid,
+            "sequence": cand.get("full_sequence") or cand.get("sequence", ""),
+            "E_L_I": ligand["E_L_I"],
+            "dG_apo": ligand.get("dG_apo", state.get("dG_apo")),
+            "dG_lig": ligand.get("dG_lig", state.get("dG_lig")),
+            "ddG_coupling": ligand.get("ddG_coupling", state.get("ddG_coupling")),
+            "agree": ligand.get("agree"),
+            "E_DNA_X_D": dna["E_DNA_X_D"],
+            "S_release": dna["S_release"],
+            "S_specificity": spec.get("specificity"),
+            "clash_count": state["clash_count"],
+            "template_similarity": state["template_similarity"],
+            "ligand_strain": state["ligand_strain"],
+            "pose_confidence": state["pose_confidence"],
+            "all_states_packed": state.get("all_states_packed", False),
+        })
+    return rows
+
+
 def run(ctx):
-    """requires ctx['candidate_features'], ctx['controls'], ctx['cfg_scoring']
-       produces ctx['ranked'] -> ranked_candidates.csv + final_N.fasta"""
+    """requires ctx['candidates','candidate_states','ligand_scores','dna_scores',
+       'specificity_scores','cfg_scoring'];  produces ctx['ranked']"""
     import csv
     import os
 
     cfg = ctx["cfg_scoring"]
-    controls = ctx["controls"]
+    # assembled here rather than by a separate stage: one owner, one field vocabulary
+    features = ctx.get("candidate_features") or assemble_candidate_features(ctx)
+    controls = ctx.get("controls") or cfg.get("calibration", {}).get("controls") or {}
     topo = cfg.get("topology", {}).get("mode", "auto")
     direction = (ctx.get("route") or {}).get("direction")
 
@@ -249,7 +317,7 @@ def run(ctx):
                                % report.get("verdict", report))
 
     kept, rejected = [], []
-    for c in ctx["candidate_features"]:
+    for c in features:
         passed, reasons = apply_gates(c, cfg, controls, topo, direction)
         (kept if passed else rejected).append(dict(c, _reasons=reasons))
 
@@ -287,6 +355,6 @@ def run(ctx):
             f.write(">%s\n%s\n" % (c.get("id", "cand"), c.get("sequence", "")))
 
     return {"ranked": {"front": front, "final": final, "rejected": len(rejected),
-                       "n_in": len(ctx["candidate_features"]), "n_passed": len(kept),
+                       "n_in": len(features), "n_passed": len(kept),
                        "csv": csv_path, "fasta": fasta_path,
                        "diversity_shortfall": max(0, n_final - len(final))}}

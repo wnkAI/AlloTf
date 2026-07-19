@@ -92,20 +92,30 @@ hard_gates:
 # ---------------------------------------------------------------------------
 # Only candidates passing ALL gates reach ranking. Pareto, not a weighted sum: a candidate that
 # fails any gate is not a sensor no matter how well it binds.
-pareto_objectives:
-  - target_binding
-  - ddG_coupling
-  - dna_release
-  - specificity
-  - fold_stability
-  - allosteric_template
+pareto:
+  # These are CANDIDATE FIELD names, not concepts. rank.py reads each key straight off the
+  # assembled feature row, so a concept name here (target_binding vs E_L_I) silently drops the
+  # objective instead of failing.
+  objectives:
+    - E_L_I                 # target binding on the induced state
+    - ddG_coupling          # linkage: (E_IL-E_DL) - (E_I0-E_D0)
+    - S_release             # DNA release, topology sign applied once in rank
+    - S_specificity         # target vs best decoy
+    - template_similarity   # distal allosteric path preserved
 
-tie_break_weights:      # used only inside the Pareto front
-  ddG_coupling:   0.35
-  target_binding: 0.25
-  dna_release:    0.20
-  specificity:    0.15
-  fold_stability: 0.05
+  maximize:
+    E_L_I: false            # an interaction energy: lower is better
+    ddG_coupling: false     # want < 0
+    S_release: true
+    S_specificity: true
+    template_similarity: true
+
+  weights:                  # tie-break INSIDE the Pareto front only, never a substitute for gates
+    ddG_coupling:        0.35
+    E_L_I:               0.25
+    S_release:           0.20
+    S_specificity:       0.15
+    template_similarity: 0.05
 
 diversity:
   cluster_identity: 0.9
