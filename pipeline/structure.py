@@ -174,8 +174,23 @@ def qc(pdb_path, expect_effector=None, expect_dimer=True, require_dna=False,
 
 
 class _Keep(Select):
-    def __init__(self, chains, drop_het=True, keep_resname=None):
-        self.chains, self.drop_het, self.keep = set(chains), drop_het, keep_resname
+    """Chain filter + heteroatom policy.
+
+    KEPT RESIDUES ARE CHECKED BEFORE THE ADDITIVE LIST, not after. Several genuine cofactors are
+    also common crystallisation additives - MG above all - so an additive-first test silently
+    deletes the very thing that makes the effector an effector. For TetR the inducer is
+    [Mg-tetracycline]+: Mg is coordinated by TAC O11/O12 and His100, and that coordination is what
+    reaches alpha6. Dropping it turns DL/IL into "TAC alone", and a failed native control could
+    then mean a broken six-state theory OR simply that we deleted the inducer.
+    """
+
+    def __init__(self, chains, drop_het=True, keep_resname=None, keep_cofactors=()):
+        self.chains, self.drop_het = set(chains), drop_het
+        keep = set()
+        if keep_resname:
+            keep.add(str(keep_resname).strip().upper())
+        keep |= {str(c).strip().upper() for c in (keep_cofactors or ()) if c}
+        self.keep = keep
 
     def accept_chain(self, c):
         return c.id in self.chains
@@ -183,19 +198,127 @@ class _Keep(Select):
     def accept_residue(self, r):
         if r.id[0] == " ":
             return True
-        n = r.get_resname().strip()
+        n = r.get_resname().strip().upper()
+        if n in self.keep:            # explicit keeps win over the additive list
+            return True
         if n in ADDITIVES:
             return False
-        if self.keep and n.upper() == self.keep.upper():
-            return True
         return not self.drop_het
 
 
-def write_state(pdb_path, out_path, chains, drop_het=True, keep_ligand=None):
+def write_state(pdb_path, out_path, chains, drop_het=True, keep_ligand=None, keep_cofactors=()):
     io = PDBIO()
     io.set_structure(load_assembly(pdb_path))   # merged assembly, chains uniquely renamed
-    io.save(out_path, _Keep(chains, drop_het, keep_ligand))
+    io.save(out_path, _Keep(chains, drop_het, keep_ligand, keep_cofactors))
     return out_path
+
+
+def transfer_ligand_complex(src_pdb, dst_pdb, resnames, pocket_resnums, out_path,
+                            src_chain=None, dst_chain=None):
+    """Move a LIGAND COMPLEX (effector + its cofactors) from one backbone to another as a RIGID
+    BODY, by superposing the two pockets.
+
+    For a metal-dependent effector the complex is the unit that matters: [Mg-tetracycline]+ is held
+    together by Mg-O11/O12 coordination, so transferring the drug by MCS and leaving the metal
+    behind - or re-placing it independently - destroys the geometry that actually triggers
+    induction. Superposing on the POCKET (not the whole protein, not the DBD) and applying one
+    transform to every atom of the complex keeps that coordination intact.
+
+    -> (out_path, rms, n_pocket_atoms_used)
+    """
+    import copy
+    from Bio.PDB.Structure import Structure
+    from Bio.PDB.Model import Model
+
+    keep = {str(r).strip().upper() for r in resnames}
+    ms, md = load_assembly(src_pdb), load_assembly(dst_pdb)
+
+    def _prot(model, want):
+        prot = classify_chains(model)[0]
+        if want:
+            for c in prot:
+                if c.id == want:
+                    return c
+        return max(prot, key=lambda c: sum(1 for r in c if r.id[0] == " "))
+
+    cs, cd = _prot(ms, src_chain), _prot(md, dst_chain)
+    want = set(int(p) for p in pocket_resnums)
+    a = {r.id[1]: r["CA"] for r in cs if r.id[0] == " " and "CA" in r and r.id[1] in want}
+    b = {r.id[1]: r["CA"] for r in cd if r.id[0] == " " and "CA" in r and r.id[1] in want}
+    common = sorted(set(a) & set(b))
+    if len(common) < 4:
+        raise RuntimeError("only %d shared pocket CA between %s and %s - cannot transfer the "
+                           "ligand complex reliably" % (len(common), os.path.basename(src_pdb),
+                                                        os.path.basename(dst_pdb)))
+    sup = Superimposer()
+    sup.set_atoms([b[i] for i in common], [a[i] for i in common])
+
+    complex_res = [r for ch in ms for r in ch
+                   if r.get_resname().strip().upper() in keep]
+    if not complex_res:
+        raise RuntimeError("none of %s found in %s: nothing to transfer"
+                           % (sorted(keep), os.path.basename(src_pdb)))
+    sup.apply([atom for r in complex_res for atom in r])   # one transform for the whole complex
+
+    merged = Structure("transferred")
+    model = Model(0)
+    merged.add(model)
+    used = set()
+    pool = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+    def _add(ch):
+        c = copy.deepcopy(ch)
+        cid = c.id if c.id not in used and str(c.id).strip() else next(
+            x for x in pool if x not in used)
+        c.id = cid
+        used.add(cid)
+        c.detach_parent()
+        model.add(c)
+        return c
+
+    for ch in md:                       # destination backbone as-is
+        _add(ch)
+    from Bio.PDB.Chain import Chain     # the transferred complex goes in its own chain
+    lig_chain = Chain(next(x for x in pool if x not in used))
+    used.add(lig_chain.id)
+    # a homodimer carries one copy of the complex per subunit, so the deposited residue ids repeat
+    # (H_MG 223 twice). Renumber sequentially into the new chain rather than dropping a copy - both
+    # subunits' effectors are real and the six states are scored on the dimer.
+    for i, r in enumerate(complex_res, start=1):
+        rc = copy.deepcopy(r)
+        rc.detach_parent()
+        het, _, icode = rc.id
+        rc.id = (het, i, icode)
+        lig_chain.add(rc)
+    model.add(lig_chain)
+
+    io = PDBIO()
+    io.set_structure(merged)
+    io.save(out_path)
+    return out_path, float(sup.rms), len(common)
+
+
+def verify_cofactors(pdb_path, cofactors, ligand_resname=None):
+    """A required cofactor missing from a written state is a hard error, never a warning.
+
+    -> counts per cofactor. Raises if any is absent: the whole point of declaring it required is
+    that its absence changes what the six states mean.
+    """
+    if not cofactors:
+        return {}
+    model = load_assembly(pdb_path)
+    found = {}
+    for c in cofactors:
+        name = str(c).strip().upper()
+        found[name] = sum(1 for ch in model for r in ch
+                          if r.get_resname().strip().upper() == name)
+    missing = [k for k, v in found.items() if v == 0]
+    if missing:
+        raise RuntimeError(
+            "required cofactor(s) %s absent from %s. For an effector that acts as a metal complex "
+            "(e.g. [Mg-tetracycline]+) this state is not the effector state at all, and a native "
+            "control built on it cannot be interpreted." % (missing, os.path.basename(pdb_path)))
+    return found
 
 
 def _core_ca(chain, exclude_range):
@@ -398,6 +521,18 @@ def run(ctx):
 
     row = load_row(tf, ctx.get("structure_db"))
     pick = pick_entries(row)
+    # An explicitly declared pair OVERRIDES the resolution-based pick. Which entries constitute
+    # this scaffold's native switch is a scientific choice, not a resolution contest: for TetR the
+    # pair is 1QPI (WT + operator) and 2TRT (WT + TAC + Mg), while the higher-resolution 2TCT holds
+    # 7-chlorotetracycline and would benchmark a different molecule.
+    ref = meta.get("reference") or {}
+    golden = meta.get("golden_pair") or {}
+    forced_holo = golden.get("induced_state") or ref.get("holo")
+    forced_dna = golden.get("dna_state") or ref.get("operator")
+    if forced_holo:
+        pick["holo"], pick["holo_forced"] = forced_holo, True
+    if forced_dna:
+        pick["dna"], pick["dna_forced"] = forced_dna, True
 
     out_dir = os.path.join(ctx["out_dir"], "states")
     holo = fetch_assembly(pick["holo"], out_dir)
@@ -416,12 +551,21 @@ def run(ctx):
     # the strained state whose cost we are trying to measure. pose.py builds it, which is why
     # this dict is deliberately incomplete here and state_builder rejects a run without it.
     holo_chains = [c.id for c in classify_chains(load_assembly(holo))[0]][:2]
+    cofactors = list(meta.get("required_cofactors") or ())
     paths["X_I_lig"] = write_state(holo, os.path.join(out_dir, "X_I_lig.pdb"),
                                    holo_chains, drop_het=True,
-                                   keep_ligand=meta["effector_resname"])
+                                   keep_ligand=meta["effector_resname"],
+                                   keep_cofactors=cofactors)
+    # a declared cofactor that did not survive the write makes this state a different chemistry
+    verify_cofactors(paths["X_I_lig"], cofactors, meta["effector_resname"])
     mapping = (st["qc"].get("induced") or {}).get("mapping") or {}
     return {"states": {"paths": paths,
                        "effector_resname": meta["effector_resname"],
+                       "required_cofactors": cofactors,
+                       "cofactor_restraints": meta.get("cofactor_restraints") or [],
+                       "protected_native_trigger": [int(r) for r in
+                                                    (meta.get("protected_native_trigger") or [])],
+                       "golden_pair": meta.get("golden_pair") or {},
                        "dbd_range": meta["dbd_range"],
                        "chain": meta.get("chain", "A"),
                        "protein_chains": holo_chains,

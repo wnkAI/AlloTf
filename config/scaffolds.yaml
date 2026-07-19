@@ -1,30 +1,66 @@
 # Per-scaffold metadata that cannot be derived from the structure database.
 #
 # atf_structure_db.csv only knows which PDB entries exist (apo / holo / DNA counts and ids). It
-# does not know which heteroatom is the real effector, where the DNA-binding domain ends, or which
-# residues line the pocket - and those three decide what gets redesigned and what the readout is.
+# does not know which heteroatom is the real effector, which cofactor the effector needs, where the
+# DNA-binding domain ends, or which residues line the pocket - and those decide what gets
+# redesigned and what the readout is.
 #
 # THESE ARE SCIENTIFIC PARAMETERS, NOT DEFAULTS. A scaffold with no entry here is refused rather
 # than guessed: inventing a dbd_range would silently redefine the output domain, and inventing
 # design_positions would redesign the wrong pocket while still producing confident numbers.
-#
-# design_positions are PDB author numbering in the structures named below; structure.py:qc()
-# re-checks them against the deposited residues and rejects a mismatch.
 
 TetR:
   chain: A
   topology_mode: inducible_repressor
-  effector_resname: CTC          # 7-chlortetracycline as deposited in 2TCT
-  dbd_range: [1, 45]             # alpha1-alpha3 three-helix bundle = DNA-binding domain
-  design_positions: [64, 82, 86, 100, 104, 105, 108, 113, 116, 134, 138]
-  reference:
-    holo: 2TCT                   # effector complex -> induced backbone X_I
-    operator: 1QPI               # TetR-tetO complex -> DNA-compatible backbone X_D
-  provenance: >
-    Pocket residues and DBD boundary taken from the classical TetR(D) literature and the 2TCT
-    contact shell. CONFIRM against the primary papers before trusting a design round: these
-    numbers set which residues are mutated and which domain is treated as the readout.
 
-# Add a scaffold here only with its effector residue name, DBD boundary and pocket residues
-# checked against that scaffold's own structures. QacR, LacI, PurR, BmrR, BenM and KstR are
-# Tier-1 (experimental apo/holo/DNA) and are the obvious next entries.
+  # TAC, not CTC. 2TCT contains 7-chlorotetracycline (CTC); the plain tetracycline complex is
+  # 2TRT, WT TetR(D) with TAC and Mg. Running the "tetracycline -> TetR" benchmark on 2TCT would
+  # validate a different molecule.
+  effector_resname: TAC
+
+  # THE EFFECTOR IS THE Mg COMPLEX, NOT THE FREE DRUG.
+  # TetR recognises and is induced by [Mg-tetracycline]+: Mg is coordinated by TAC O11/O12,
+  # His100 and waters, and that coordination is what propagates through Thr103 to unwind alpha6.
+  # Dropping Mg would make DL/IL "TAC alone", and a failed native control could then mean either a
+  # broken six-state theory or simply that we deleted the actual inducer.
+  required_cofactors:
+    - MG
+  # Coordination geometry to preserve when the native states are built.
+  cofactor_restraints:
+    - [MG, "A/100/NE2"]      # His100 NE2 - Mg
+    - [MG, "TAC/O11"]
+    - [MG, "TAC/O12"]
+
+  # alpha1-alpha3 three-helix bundle. alpha4 begins at Lys48 and links the DNA-binding domain to
+  # the regulatory core, so 48-63 carries allosteric transmission and is NOT pure output.
+  dbd_range: [1, 47]
+
+  # TEMPORARY MASK for the first software run only. NOT a verified contact shell: this list mixes
+  # ligand-contact residues, positions used in past TetR engineering, and transmission residues
+  # that may not touch TAC at all. The real set is resolved from the 2TRT contact shell in Step B
+  # and frozen to resolved_design_positions.json before any candidate is ranked.
+  design_positions:
+    [64, 82, 86, 100, 104, 105, 108, 113, 116, 134, 138]
+
+  # Directly involved in Mg recognition and in triggering induction. Held fixed for the native
+  # benchmark so candidate search cannot manufacture negatives by destroying the native Mg
+  # mechanism. Reconsider only when designing targets that do not use a metal.
+  protected_native_trigger:
+    - 100      # His100 - coordinates Mg
+    - 103      # Thr103 - relays the coordination change into alpha6
+
+  reference:
+    holo: 2TRT               # WT TetR(D) + TAC + Mg  -> induced state X_I
+    operator: 1QPI           # WT TetR + tetO         -> DNA-compatible state X_D
+
+  # The first golden benchmark pair, fixed. NOT "all 13 apo / 36 holo": those entries mix
+  # anhydrotetracycline, 7-chlorotetracycline, tigecycline, mutant TetR, different constructs and
+  # different Mg occupancy. Pooling them would give a sigma that blends structural uncertainty with
+  # ligand chemistry, sequence differences and metal occupancy - which is not an ensemble error.
+  golden_pair:
+    dna_state: 1QPI
+    induced_state: 2TRT
+
+# Add a scaffold here only with its effector residue name, required cofactors, DBD boundary and
+# pocket residues checked against that scaffold's own structures. QacR, LacI, PurR, BmrR, BenM and
+# KstR are Tier-1 (experimental apo/holo/DNA) and are the obvious next entries.
