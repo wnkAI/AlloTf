@@ -121,7 +121,8 @@ def qc(pdb_path, expect_effector=None, expect_dimer=True, require_dna=False,
        design_positions=(), expect_wt_11mer=None):
     """-> (ok, report). Any problem is a rejection, not a warning."""
     rep = dict(pdb=os.path.basename(pdb_path), problems=[], notes=[])
-    model = next(iter(_struct(pdb_path)))
+    model = load_assembly(pdb_path)      # merged assembly: a multi-MODEL dimer must not
+                                         # collapse to a monomer before chain counting
     prot, dna, het = classify_chains(model)
     rep["n_protein_chains"] = len(prot)
     rep["n_dna_chains"] = len(dna)
@@ -189,7 +190,7 @@ class _Keep(Select):
 
 def write_state(pdb_path, out_path, chains, drop_het=True, keep_ligand=None):
     io = PDBIO()
-    io.set_structure(_struct(pdb_path))
+    io.set_structure(load_assembly(pdb_path))   # merged assembly, chains uniquely renamed
     io.save(out_path, _Keep(chains, drop_het, keep_ligand))
     return out_path
 
@@ -207,21 +208,58 @@ def build_induced_on_dna(holo_pdb, dna_pdb, out_path, dbd_range, chain_i=None, c
     Superpose on the ligand-binding CORE only, never on the DBD: the DBD is the readout. Fitting
     the DBD would force the induced conformation onto the operator and erase exactly the clash we
     are trying to measure.
+
+    The output MERGES the superposed induced protein (every subunit) with the operator DNA chains
+    taken from the DNA complex. Re-saving the holo structure alone yields an "X_I_DNA" containing
+    no DNA at all - state_builder then rejects the state, and the DNA-release term is unavailable.
     """
-    mi, md = next(iter(_struct(holo_pdb))), next(iter(_struct(dna_pdb)))
-    pi = [c for c in classify_chains(mi)[0]]
-    pd = [c for c in classify_chains(md)[0]]
-    ci = mi[chain_i] if chain_i else max(pi, key=lambda c: sum(1 for r in c if r.id[0] == " "))
-    cd = md[chain_d] if chain_d else max(pd, key=lambda c: sum(1 for r in c if r.id[0] == " "))
+    import copy
+    from Bio.PDB.Structure import Structure
+    from Bio.PDB.Model import Model
+
+    mi, md = load_assembly(holo_pdb), load_assembly(dna_pdb)
+    pi = list(classify_chains(mi)[0])
+    pd, dna_chains, _ = classify_chains(md)
+    if not dna_chains:
+        raise RuntimeError("%s carries no DNA chain: cannot build the operator-bound induced state"
+                           % os.path.basename(dna_pdb))
+    nres = lambda c: sum(1 for r in c if r.id[0] == " ")
+    ci = mi[chain_i] if chain_i else max(pi, key=nres)
+    cd = md[chain_d] if chain_d else max(pd, key=nres)
+
     a, b = _core_ca(ci, dbd_range), _core_ca(cd, dbd_range)
     common = sorted(set(a) & set(b))
     if len(common) < 40:
         raise RuntimeError("only %d shared core CA - cannot superpose reliably" % len(common))
     sup = Superimposer()
     sup.set_atoms([b[i] for i in common], [a[i] for i in common])
-    sup.apply([atom for r in ci for atom in r])
+    # move the WHOLE induced protein, not only the reference chain: the other subunit belongs to
+    # the same rigid body and would otherwise be left behind in the holo frame
+    sup.apply([atom for ch in pi for r in ch for atom in r])
+
+    merged = Structure("X_I_DNA")
+    model = Model(0)
+    merged.add(model)
+    used = set()
+    pool = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+    def _add(ch):
+        c = copy.deepcopy(ch)          # deep-copied AFTER superposition, so it carries new coords
+        cid = c.id
+        if cid in used or not str(cid).strip():
+            cid = next(x for x in pool if x not in used)
+        c.id = cid
+        used.add(cid)
+        c.detach_parent()
+        model.add(c)
+
+    for ch in pi:
+        _add(ch)
+    for ch in dna_chains:              # the operator itself
+        _add(ch)
+
     io = PDBIO()
-    io.set_structure(_struct(holo_pdb))
+    io.set_structure(merged)
     io.save(out_path)
     return out_path, float(sup.rms), len(common)
 
@@ -240,7 +278,7 @@ def prepare(tf_name, holo_pdb, dna_pdb, out_dir, design_positions, effector_resn
     if not (ok_i and ok_d):
         raise RuntimeError("QC rejected %s:\n%s" % (tf_name, json.dumps(report, indent=2)))
 
-    mi, md = next(iter(_struct(holo_pdb))), next(iter(_struct(dna_pdb)))
+    mi, md = load_assembly(holo_pdb), load_assembly(dna_pdb)
     ci = [c.id for c in classify_chains(mi)[0]][:2]
     pd_, dna_, _ = classify_chains(md)
     cd_prot = [c.id for c in pd_][:2]
@@ -344,7 +382,7 @@ def run(ctx):
     # X_D_lig has NO crystal by construction: a ligand sitting on the DNA-compatible backbone is
     # the strained state whose cost we are trying to measure. pose.py builds it, which is why
     # this dict is deliberately incomplete here and state_builder rejects a run without it.
-    holo_chains = [c.id for c in classify_chains(next(iter(_struct(holo))))[0]][:2]
+    holo_chains = [c.id for c in classify_chains(load_assembly(holo))[0]][:2]
     paths["X_I_lig"] = write_state(holo, os.path.join(out_dir, "X_I_lig.pdb"),
                                    holo_chains, drop_het=True,
                                    keep_ligand=sc["effector_resname"])
