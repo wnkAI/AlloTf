@@ -154,6 +154,9 @@ def qc(pdb_path, expect_effector=None, expect_dimer=True, require_dna=False,
         else:
             ch = max(prot, key=lambda c: sum(1 for r in c if r.id[0] == " "))
             have = {r.id[1]: r.get_resname() for r in ch if r.id[0] == " "}
+            # the mapping structure.run hands downstream: design position -> residue actually
+            # deposited there. Without it run_stage sees residue_mapping=None and rejects the stage.
+            rep["mapping"] = {int(p): have[p] for p in design_positions if p in have}
             missing = [p for p in design_positions if p not in have]
             if missing:
                 rep["problems"].append("design positions unresolved: %s" % missing)
@@ -360,10 +363,39 @@ def load_row(tf_name, db_path=None):
     raise KeyError("%s not in %s" % (tf_name, db_path))
 
 
+def load_scaffold_meta(tf, path=None):
+    """Per-scaffold parameters (effector residue, DBD boundary, pocket positions) from
+    config/scaffolds.yaml.
+
+    An unregistered scaffold is REFUSED rather than guessed. The structure database only knows
+    which PDB entries exist; inventing a dbd_range would silently redefine the readout domain and
+    inventing design_positions would redesign the wrong pocket - both while still producing
+    confident numbers.
+    """
+    import yaml
+    path = path or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "config", "scaffolds.yaml")
+    with open(path) as f:
+        table = yaml.safe_load(f) or {}
+    if tf not in table:
+        raise RuntimeError(
+            "scaffold '%s' has no entry in %s: effector_resname / dbd_range / design_positions "
+            "cannot be derived from the structure database. Add them, checked against that "
+            "scaffold's own structures, before designing on it. Registered: %s"
+            % (tf, os.path.basename(path), ", ".join(sorted(table)) or "none"))
+    return table[tf]
+
+
 def run(ctx):
     """requires ctx['scaffold']; produces ctx['states'], ctx['residue_mapping']"""
     sc = ctx["scaffold"]
     tf = sc["tf_name"] if isinstance(sc, dict) else sc
+    # route hands over a scaffold NAME; its parameters live in config/scaffolds.yaml. An explicit
+    # dict from the caller overrides the table entry field by field.
+    meta = dict(load_scaffold_meta(tf, ctx.get("scaffold_config")))
+    if isinstance(sc, dict):
+        meta.update({k: v for k, v in sc.items() if v is not None})
+
     row = load_row(tf, ctx.get("structure_db"))
     pick = pick_entries(row)
 
@@ -371,11 +403,12 @@ def run(ctx):
     holo = fetch_assembly(pick["holo"], out_dir)
     dna = fetch_assembly(pick["dna"], out_dir)
 
+    design_positions = [int(p) for p in (meta.get("design_positions") or ())]
     st = prepare(tf, holo, dna, out_dir,
-                 design_positions=sc.get("design_positions", ()),
-                 effector_resname=sc["effector_resname"],
-                 dbd_range=sc["dbd_range"],
-                 expect_wt_11mer=sc.get("expect_wt_11mer"))
+                 design_positions=design_positions,
+                 effector_resname=meta["effector_resname"],
+                 dbd_range=meta["dbd_range"],
+                 expect_wt_11mer=meta.get("expect_wt_11mer"))
 
     paths = {k: v for k, v in st.items() if k != "qc"}
     # X_I_lig is the holo structure itself - the one state we have a crystal for.
@@ -385,11 +418,15 @@ def run(ctx):
     holo_chains = [c.id for c in classify_chains(load_assembly(holo))[0]][:2]
     paths["X_I_lig"] = write_state(holo, os.path.join(out_dir, "X_I_lig.pdb"),
                                    holo_chains, drop_het=True,
-                                   keep_ligand=sc["effector_resname"])
+                                   keep_ligand=meta["effector_resname"])
+    mapping = (st["qc"].get("induced") or {}).get("mapping") or {}
     return {"states": {"paths": paths,
-                       "effector_resname": sc["effector_resname"],
-                       "dbd_range": sc["dbd_range"],
-                       "chain": sc.get("chain", "A"),
+                       "effector_resname": meta["effector_resname"],
+                       "dbd_range": meta["dbd_range"],
+                       "chain": meta.get("chain", "A"),
+                       "protein_chains": holo_chains,
+                       "design_positions": design_positions,
+                       "topology_mode": meta.get("topology_mode", "inducible_repressor"),
                        "entries": pick,
                        "qc": st["qc"]},
-            "residue_mapping": st["qc"].get("induced", {}).get("mapping")}
+            "residue_mapping": mapping}

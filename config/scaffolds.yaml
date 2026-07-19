@@ -1,0 +1,30 @@
+# Per-scaffold metadata that cannot be derived from the structure database.
+#
+# atf_structure_db.csv only knows which PDB entries exist (apo / holo / DNA counts and ids). It
+# does not know which heteroatom is the real effector, where the DNA-binding domain ends, or which
+# residues line the pocket - and those three decide what gets redesigned and what the readout is.
+#
+# THESE ARE SCIENTIFIC PARAMETERS, NOT DEFAULTS. A scaffold with no entry here is refused rather
+# than guessed: inventing a dbd_range would silently redefine the output domain, and inventing
+# design_positions would redesign the wrong pocket while still producing confident numbers.
+#
+# design_positions are PDB author numbering in the structures named below; structure.py:qc()
+# re-checks them against the deposited residues and rejects a mismatch.
+
+TetR:
+  chain: A
+  topology_mode: inducible_repressor
+  effector_resname: CTC          # 7-chlortetracycline as deposited in 2TCT
+  dbd_range: [1, 45]             # alpha1-alpha3 three-helix bundle = DNA-binding domain
+  design_positions: [64, 82, 86, 100, 104, 105, 108, 113, 116, 134, 138]
+  reference:
+    holo: 2TCT                   # effector complex -> induced backbone X_I
+    operator: 1QPI               # TetR-tetO complex -> DNA-compatible backbone X_D
+  provenance: >
+    Pocket residues and DBD boundary taken from the classical TetR(D) literature and the 2TCT
+    contact shell. CONFIRM against the primary papers before trusting a design round: these
+    numbers set which residues are mutated and which domain is treated as the readout.
+
+# Add a scaffold here only with its effector residue name, DBD boundary and pocket residues
+# checked against that scaffold's own structures. QacR, LacI, PurR, BmrR, BenM and KstR are
+# Tier-1 (experimental apo/holo/DNA) and are the obvious next entries.

@@ -8,7 +8,7 @@ usage:  python route.py "naringenin"
         python route.py "CC(=O)Oc1ccccc1C(=O)O" --top 8
 import:  from route import route ; hits = route("quinine")
 """
-import os, sys, csv, urllib.request, urllib.parse
+import os, sys, csv, time, urllib.request, urllib.parse, urllib.error
 import numpy as np
 from rdkit import Chem, RDLogger
 from rdkit.Chem import AllChem, Descriptors, rdFMCS, rdMolDescriptors
@@ -22,12 +22,34 @@ W_TOTAL=dict(chem=0.6, struct=0.4)
 MODE_ENH=0.95; MODE_NEAR=0.40
 TIER_SCORE={1:0.70, 2:0.40, 3:0.10}
 
-def resolve(q):
+def resolve(q, retries=4):
+    """name / SMILES / .sdf path -> isomeric SMILES, or None if PubChem genuinely has no such name.
+
+    PubChem rate-limits at ~5 requests/s. The old bare `except: return None` reported a throttled
+    request (429/503) exactly like an unknown molecule, so a run that touched PubChem a few times
+    in a row failed with "cannot resolve molecule" on names that resolve perfectly a second later.
+    A transient failure is retried with backoff and, if it never succeeds, raised WITH its cause -
+    only a real 404 returns None.
+    """
+    if os.path.isfile(q) and q.lower().endswith((".sdf",".mol")):
+        m=Chem.MolFromMolFile(q)
+        if m is None: raise ValueError("cannot read a molecule from %s"%q)
+        return Chem.MolToSmiles(m)
     if Chem.MolFromSmiles(q): return q
-    try:
-        u="https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/%s/property/IsomericSMILES/TXT"%urllib.parse.quote(q)
-        return urllib.request.urlopen(u,timeout=25).read().decode().strip().split("\n")[0]
-    except Exception: return None
+    u="https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/%s/property/IsomericSMILES/TXT"%urllib.parse.quote(q)
+    last=None
+    for attempt in range(retries):
+        try:
+            return urllib.request.urlopen(u,timeout=25).read().decode().strip().split("\n")[0]
+        except urllib.error.HTTPError as e:
+            if e.code==404: return None          # PubChem really does not know this name
+            last=e
+        except Exception as e:
+            last=e
+        time.sleep(0.6*(2**attempt))
+    raise RuntimeError("PubChem lookup for %r failed after %d attempts (%s: %s). This is a "
+                       "transient/throttling failure, not an unknown molecule."
+                       %(q,retries,type(last).__name__,str(last)[:160]))
 
 def _load():
     lig=[]
