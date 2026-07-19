@@ -61,6 +61,37 @@ TetR:
     dna_state: 1QPI
     induced_state: 2TRT
 
-# Add a scaffold here only with its effector residue name, required cofactors, DBD boundary and
-# pocket residues checked against that scaffold's own structures. QacR, LacI, PurR, BmrR, BenM and
-# KstR are Tier-1 (experimental apo/holo/DNA) and are the obvious next entries.
+LacI:
+  chain: A
+  topology_mode: inducible_repressor
+
+  effector_resname: IPT          # IPTG as deposited in 1LBH
+  required_cofactors: []         # no metal: unlike TetR the inducer acts alone
+
+  # MEASURED, not assumed: residues within 4.5 A of the operator in 1LBG are 5-58
+  # (headpiece HTH plus the hinge helix, which inserts into the minor groove). The boundary is set
+  # past the last contact so the entire readout - including the hinge - stays out of design.
+  dbd_range: [1, 61]
+
+  # design_positions deliberately ABSENT: they are resolved from the effector's contact shell in
+  # the holo structure by structure.resolve_design_positions and frozen to
+  # resolved_design_positions.json. Nobody should have to know this pocket by heart.
+
+  reference:
+    holo: 1LBH                   # LacI + IPTG        -> induced state X_I
+    operator: 1LBG               # LacI + operator    -> DNA-compatible state X_D
+  golden_pair:
+    dna_state: 1LBG
+    induced_state: 1LBH
+
+  # KNOWN STRUCTURAL LIMITATION, measured here: 1LBH covers residues 62-357 only. The DNA-binding
+  # domain is absent from every IPTG-bound LacI structure because induction disorders it - which is
+  # the mechanism itself, not a defect of the deposition. Consequence: the induced backbone has no
+  # DBD, so I_DNA cannot be built the way it is for TetR, and the first term of S_release has no
+  # structural basis. 1CJG/1L1M/1LCC do not help - they are isolated headpiece fragments (51-62
+  # residues) with no effector pocket.
+  induced_state_lacks_dbd: true
+
+# Add a scaffold here only with its effector residue name, required cofactors and DBD boundary
+# checked against that scaffold's own structures. Pocket residues are resolved automatically.
+# QacR, PurR, BmrR, BenM and KstR are Tier-1 and are the obvious next entries.

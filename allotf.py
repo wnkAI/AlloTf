@@ -266,6 +266,10 @@ def cmd_design(a):
         return 1
     hit = sel[0]
     scaffold = hit["tf"]
+    # carry the CHOSEN scaffold's native effector onto the route record. Downstream stages read
+    # route['native_smiles']; without it pose falls back to docking and specificity loses the
+    # decoy the scaffold is pre-adapted to bind.
+    r = dict(r, native_smiles=hit.get("native_smiles"), native_ligand=hit.get("native"))
     project = a.project or os.path.join(ROOT, "projects", project_id(a.target, scaffold))
     os.makedirs(project, exist_ok=True)
 

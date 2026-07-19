@@ -100,6 +100,9 @@ def route(query, top_k=10):
         schem=(W_CHEM["s2d"]*s2d+W_CHEM["smcs"]*smcs+W_CHEM["spharm"]*spharm+W_CHEM["sphys"]*sphys)
         sstruct,tier,note=_struct_score(st.get(e["tf_name"]))
         hits.append(dict(tf=e["tf_name"],family=e["family"],native=e["native_ligand"],
+            # the native effector's CHEMISTRY, not just its name: pose.py needs it to transfer the
+            # target onto the crystallographic pose, and specificity needs it as a decoy
+            native_smiles=e["smiles"],
             chem_note=e["chem_note"],s2d=s2d,smcs=smcs,spharm=spharm,sphys=sphys,
             s_chem=schem,s_struct=sstruct,tier=tier,tier_note=note,
             total=W_TOTAL["chem"]*schem+W_TOTAL["struct"]*sstruct,
