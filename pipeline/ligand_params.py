@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 
 META = "ligand_metadata.json"
 
@@ -49,7 +50,7 @@ def from_sdf(sdf_path, out_dir, name="LIG", formal_charge=None, n_conformers=1,
     if molfile_to_params is None:
         molfile_to_params = _find_molfile_to_params()
     params = os.path.join(out_dir, "%s.params" % name)
-    cmd = ["python", molfile_to_params, "-n", name, "-p", os.path.join(out_dir, name),
+    cmd = [sys.executable, molfile_to_params, "-n", name, "-p", os.path.join(out_dir, name),
            "--keep-names", "--conformers-in-one-file", sdf_path]
     if n_conformers > 1:
         cmd.insert(-1, "--recharge=%d" % q)
@@ -69,35 +70,53 @@ def from_sdf(sdf_path, out_dir, name="LIG", formal_charge=None, n_conformers=1,
 
 
 def _find_molfile_to_params():
+    # explicit override wins
+    env = os.environ.get("ROSETTA_MOLFILE_TO_PARAMS")
+    if env and os.path.exists(env):
+        return env
+    # the pip/conda PyRosetta wheels do NOT ship this script; fetch it once from the public
+    # Rosetta source into ~/rosetta_tools (see tools/get_molfile_to_params.sh)
+    cands = [os.path.expanduser("~/rosetta_tools/molfile_to_params.py")]
     try:
         import pyrosetta
         base = os.path.dirname(pyrosetta.__file__)
-        for sub in ("toolbox/molfile_to_params.py", "../molfile_to_params.py",
-                    "database/chemical/molfile_to_params.py"):
-            p = os.path.normpath(os.path.join(base, sub))
-            if os.path.exists(p):
-                return p
+        cands += [os.path.normpath(os.path.join(base, sub)) for sub in
+                  ("toolbox/molfile_to_params.py", "../molfile_to_params.py")]
     except Exception:
         pass
-    raise RuntimeError("molfile_to_params.py not found. It ships with PyRosetta/Rosetta; without "
-                       "it no ligand can be scored, and there is no safe default.")
+    for p in cands:
+        if os.path.exists(p):
+            return p
+    raise RuntimeError(
+        "molfile_to_params.py not found. The pip/conda PyRosetta wheels omit it; get it with "
+        "tools/get_molfile_to_params.sh (downloads from the public Rosetta source into "
+        "~/rosetta_tools), or set ROSETTA_MOLFILE_TO_PARAMS to its path.")
 
 
-def verify_params_charge(params_path, expected_charge, tol=0.05):
+def verify_params_charge(params_path, expected_charge):
     """Rosetta partial charges must sum to the formal charge. If they do not, every fa_elec term
-    in all six states is wrong by the same silent amount."""
+    in all six states is wrong by the same silent amount.
+
+    molfile_to_params writes each charge to 2 decimals, so the sum carries up to 0.005 of rounding
+    noise per atom. The tolerance is that quantization budget (0.005*n), not a fixed number: a real
+    off-by-one protonation shifts the sum by ~1.0 and is still caught with a wide margin, while a
+    30-atom ligand summing to -0.09 is just rounding and must pass."""
     tot = 0.0
+    n = 0
     for line in open(params_path):
         if line.startswith("ATOM "):
             f = line.split()
             if len(f) >= 5:
                 try:
-                    tot += float(f[4])
+                    tot += float(f[-1])
+                    n += 1
                 except ValueError:
                     pass
+    tol = max(0.05, 0.005 * n)
     if abs(tot - expected_charge) > tol:
-        raise ValueError("params partial charges sum to %+.3f but formal charge is %+d (%s)"
-                         % (tot, expected_charge, params_path))
+        raise ValueError("params partial charges sum to %+.3f but formal charge is %+d, off by more "
+                         "than the %d-atom rounding budget %.3f (%s)"
+                         % (tot, expected_charge, n, tol, params_path))
     return tot
 
 
