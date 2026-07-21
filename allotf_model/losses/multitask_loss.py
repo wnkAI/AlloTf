@@ -44,8 +44,7 @@ class MultiTaskLoss(nn.Module):
                     cnt[key] += 1
             acc["contrast"] = acc["contrast"] + self.contrast(out["pooled"])
             acc["mech"] = acc["mech"] + mechanistic_penalty(
-                out, lab.get("dna_compat_apo"), lab.get("dna_compat_lig"),
-                lab.get("topology_sign", 1))
+                out, lab.get("dna_compat_apo"), lab.get("dna_compat_lig"))
 
         for k in ("bind", "path", "switch"):
             if cnt[k]:
@@ -55,8 +54,8 @@ class MultiTaskLoss(nn.Module):
         acc["mech"] = acc["mech"] / n
 
         scores = torch.stack([o["S_final"] for o in outputs])
-        tf_ids = [lab.get("tf_id", i) for i, lab in enumerate(labels)]
-        tiers = [lab.get("tier", 0) for lab in labels]
+        tf_ids = [lab.get("tf_id") for lab in labels]        # None -> excluded from ranking
+        tiers = [lab.get("tier") for lab in labels]
         acc["rank"] = pairwise_ranking(scores, tf_ids, tiers)
 
         total = sum(self.l[k] * acc[k] for k in acc)
