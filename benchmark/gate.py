@@ -6,7 +6,7 @@ seen, ranks by the WEAKEST necessary condition (RSM) rather than a weighted sum,
 parameter-free pocket->DBD resolvent channel, and attributes each failure to a margin. Every step is
 fail-closed: a state that cannot be built honestly is reported unavailable, never scored as zero.
 
-Run:  python -m benchmark.gate --scaffold LacI --out results/gate_lacI
+Run:  python -m benchmark.gate --scaffold <NAME> --effector-smiles "<SMILES>" --out results/gate
       (needs the PyRosetta conda env + molfile_to_params; see benchmark/RUNNING.md)
 """
 import argparse
@@ -15,12 +15,6 @@ import json
 import os
 
 from benchmark import freeze, schema, run_gate
-
-
-NATIVE_SMILES = {
-    # scaffold -> the native effector SMILES used to build the DL/IL states
-    "LacI": "CC(C)S[C@H]1[C@@H]([C@H]([C@H]([C@H](O1)CO)O)O)O",   # IPTG
-}
 
 
 def _is_full_atom(pdb):
@@ -40,7 +34,7 @@ def _is_full_atom(pdb):
     return ca > 0 and cb > ca * 0.3   # every non-Gly residue has a CB; a CA trace has none
 
 
-def build_scaffold(scaffold, out_dir, operator_override=None):
+def build_scaffold(scaffold, out_dir, effector_smiles, operator_override=None):
     """Fetch/prepare the six-state templates + effector-loaded states + a shared backend.
 
     Returns everything score_variant needs. States that cannot be built honestly are set to None:
@@ -62,9 +56,9 @@ def build_scaffold(scaffold, out_dir, operator_override=None):
     paths = dict(st["paths"])
     pocket = json.load(open(os.path.join(out_dir, "resolved_design_positions.json")))["design_positions"]
 
-    smi = NATIVE_SMILES.get(scaffold)
+    smi = effector_smiles
     if not smi:
-        raise RuntimeError("no native effector SMILES registered for %s" % scaffold)
+        raise RuntimeError("no effector SMILES given (pass --effector-smiles)")
     ligdir = os.path.join(out_dir, "lig"); os.makedirs(ligdir, exist_ok=True)
     m = Chem.AddHs(Chem.MolFromSmiles(smi))
     AllChem.EmbedMolecule(m, randomSeed=1); AllChem.MMFFOptimizeMolecule(m)
@@ -133,7 +127,9 @@ def score_variant(scaf, mutation_map):
 
 def main():
     ap = argparse.ArgumentParser(description="Run the switch/non-switch gate.")
-    ap.add_argument("--scaffold", default="LacI")
+    ap.add_argument("--scaffold", required=True)
+    ap.add_argument("--effector-smiles", required=True,
+                    help="the scaffold's native inducer SMILES, used to build the DL/IL states")
     ap.add_argument("--manifest", default="benchmark/retrospective_switches/manifest.csv")
     ap.add_argument("--out", default="results/gate")
     args = ap.parse_args()
@@ -147,7 +143,7 @@ def main():
     schema.validate_manifest(rows)
     print("variants for %s: %d" % (args.scaffold, len(rows)))
 
-    scaf = build_scaffold(args.scaffold, args.out)
+    scaf = build_scaffold(args.scaffold, args.out, args.effector_smiles)
     print("state availability:", scaf["availability"])
 
     results = []

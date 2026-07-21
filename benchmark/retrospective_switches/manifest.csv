@@ -1,10 +1,1 @@
 scaffold,family,operator,ligand,wt_sequence,variant_sequence,mutation,functional_label,failure_subtype,assay_type,basal_output,induced_output,fold_change,ligand_concentration,evidence_source,evidence_grade
-LacI,LacI,O1,IPTG,UniProt:P03023,UniProt:P03023,WT,functional_switch,,dose_response,,,,,Chure 2019 PNAS 10.1073/pnas.1907869116,A
-LacI,LacI,O1,IPTG,UniProt:P03023,UniProt:P03023/Q291K,Q291K,non_switch,nonresponder,dose_response,,,,,Chure 2019 PNAS 10.1073/pnas.1907869116,A
-LacI,LacI,O1,IPTG,UniProt:P03023,UniProt:P03023/Q291R,Q291R,non_switch,nonresponder,dose_response,,,,,Chure 2019 PNAS 10.1073/pnas.1907869116,A
-LacI,LacI,O1,IPTG,UniProt:P03023,UniProt:P03023/Q291V,Q291V,non_switch,nonresponder,dose_response,,,,,Chure 2019 PNAS 10.1073/pnas.1907869116,B
-LacI,LacI,O1,IPTG,UniProt:P03023,UniProt:P03023/F161T,F161T,non_switch,nonresponder,dose_response,,,,,Chure 2019 PNAS 10.1073/pnas.1907869116,B
-LacI,LacI,O1,IPTG,UniProt:P03023,UniProt:P03023/Q18M,Q18M,functional_switch,,dose_response,,,,,Chure 2019 PNAS 10.1073/pnas.1907869116,B
-LacI,LacI,O1,IPTG,UniProt:P03023,UniProt:P03023/Y17I,Y17I,functional_switch,,dose_response,,,,,Chure 2019 PNAS 10.1073/pnas.1907869116,C
-LacI,LacI,O1,IPTG,UniProt:P03023,UniProt:P03023/Q18A,Q18A,functional_switch,,dose_response,,,,,Chure 2019 PNAS 10.1073/pnas.1907869116,C
-LacI,LacI,O1,GlcNAc,UniProt:P03023,UniProt:P03023/Q291F,Q291F,functional_switch,,fluorescence,,,,,user wet-lab: LacI Q291F activated by GlcNAc (retargeted non-native effector; report separately),B

@@ -1,8 +1,9 @@
 # How to run
 
-The workflow is: **give a target molecule → the pipeline retargets LacI to it and scores the six
-states → it reports problems honestly** (a state it cannot build is marked unavailable, never scored
-as zero). The process itself is the contribution; every stage is fail-closed.
+The workflow is: **give a target molecule → the pipeline retargets a chosen scaffold to it and
+scores the six states → it reports problems honestly** (a state it cannot build is marked
+unavailable, never scored as zero). The process itself is the contribution; every stage is
+fail-closed.
 
 ## 1. One-time environment (WSL, conda)
 
@@ -27,10 +28,8 @@ Always run with this env's python: `~/miniconda3/envs/rosetta/bin/python`.
 cd /path/to/AlloTf
 PY=~/miniconda3/envs/rosetta/bin/python
 
-# retarget LacI to a molecule (name, SMILES, or a .sdf path)
-$PY allotf.py design --target "N-acetyl-D-glucosamine" --scaffold LacI --project results/glcnac
-# or by SMILES:
-$PY allotf.py design --target "CC(=O)N[C@@H]1[C@H]([C@@H]([C@H](O[C@@H]1O)CO)O)O" --scaffold LacI
+# retarget a scaffold to a target molecule (name, SMILES, or a .sdf path)
+$PY allotf.py design --target "<molecule name or SMILES>" --scaffold <SCAFFOLD> --project results/run1
 ```
 
 Output goes under `--project`: ranked designs, per-candidate six-state margins, functional category,
@@ -39,23 +38,24 @@ and a run manifest (git commit + structure/params hashes + seed).
 ## 3. Run the retrospective switch/non-switch gate (validation)
 
 ```bash
-$PY -m benchmark.gate --scaffold LacI --out results/gate_lacI
+$PY -m benchmark.gate --scaffold <SCAFFOLD> --effector-smiles "<native inducer SMILES>" --out results/gate
 ```
 
 This freezes the scoring contract (`frozen_config.json`), scores every manifest variant, and writes
-`gate_results.json`. Add variants in `benchmark/retrospective_switches/manifest.csv` (schema +
-discipline in `benchmark/schema.py` and `benchmark/retrospective_switches/README.md`).
+`gate_results.json`. Populate `benchmark/retrospective_switches/manifest.csv` with variants whose
+switch / non-switch labels come only from independent experiment (schema + discipline in
+`benchmark/schema.py` and `benchmark/retrospective_switches/README.md`).
 
-## Known LacI structural limitation (the process reports it, does not hide it)
+## Deposited-structure limitations the pipeline reports (not hides)
 
-LacI's deposited states are each missing something the six states need, so the pipeline flags them
+Some scaffolds' deposited states are missing what the six states need. The pipeline flags these
 instead of emitting confident numbers:
 
-- **D state (1LBG) is CA-only** (no side chains) → D0 / D_DNA are not scorable as deposited.
-- **Induced state (1LBH) lacks the DBD** (disordered on induction) → no valid I_DNA → the DNA-release
-  margin is unavailable.
+- **A CA-only D state** (no side chains) is not scorable → D0 / D_DNA are marked unavailable until a
+  full-atom operator structure is supplied (edit `reference.operator` for that scaffold in
+  `config/scaffolds.yaml`).
+- **An induced state that lacks the DBD** (disordered on induction) has no valid operator complex →
+  the DNA-release margin is unavailable.
 
-To get complete LacI numbers, point the D state at a **full-atom** LacI-operator structure (edit the
-`reference.operator` entry for LacI in `config/scaffolds.yaml`). Until then the gate scores whatever
-states are valid and marks the rest unavailable — by design, not by accident.
-```
+Until such a state is supplied, the gate scores whatever states are valid and marks the rest
+unavailable — by design, not by accident.
