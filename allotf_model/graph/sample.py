@@ -51,5 +51,29 @@ class Sample:
                       self.comm_edge_attr.to(d), self.physics.to(d), self.tf_id, self.ligand_id)
 
 
+@dataclass
+class TransferSample:
+    """A design candidate PLUS the native response teacher. The native reference (WT scaffold + native
+    ligand) is the SAME scaffold as the design, so it reuses the design's communication graph, pocket
+    and DBD indices; only the residue features (WT vs mutant encoding) and the ligand differ.
+
+    distal_idx marks the response-matching region (pocket exit -> hinge -> dimer interface -> DBD):
+    the transfer loss is applied ONLY there, so the new ligand's pocket chemistry stays free.
+    aux carries generator-derived physical features (pose confidence, strain, backbone displacement,
+    docking consistency) with a per-feature confidence in [0,1]; the model may ignore low-confidence
+    ones and they never serve as a functional label.
+    """
+    design: "Sample"                   # mutant scaffold + target ligand
+    native_protein: ProteinGraph       # WT scaffold (same structure, WT encoding)
+    native_ligand: LigandGraph         # native effector
+    distal_idx: torch.Tensor           # residues where the native response is matched
+    aux: torch.Tensor = field(default_factory=lambda: torch.zeros(0))
+    aux_confidence: torch.Tensor = field(default_factory=lambda: torch.zeros(0))
+
+    def to(self, d):
+        return TransferSample(self.design.to(d), self.native_protein.to(d), self.native_ligand.to(d),
+                              self.distal_idx.to(d), self.aux.to(d), self.aux_confidence.to(d))
+
+
 def collate(samples):
     return list(samples)
