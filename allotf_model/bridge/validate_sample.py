@@ -30,6 +30,11 @@ def validate(s: TransferSample):
         raise AssertionError("residue_positions has non-finite values")
     if not s.distal_mask.any():
         raise AssertionError("distal_mask is empty: the response-matching region is undefined")
+    # fail closed: the frozen native teacher must be usable on >=2 residues or transfer is meaningless
+    usable = int((s.native_response_mask.bool() & (s.native_response_confidence > 0)).sum())
+    if usable < 2:
+        raise AssertionError("native teacher usable on %d residue(s) (need >=2): empty mask or zero "
+                             "confidence - fail closed" % usable)
     for nm in ("physics_aux", "physics_aux_confidence", "physics_aux_mask"):
         if getattr(s, nm).shape[0] != len(s.physics_aux_names):
             raise AssertionError("%s length != number of physics_aux_names" % nm)
