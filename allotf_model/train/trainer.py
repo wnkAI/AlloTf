@@ -30,7 +30,11 @@ class Trainer:
         pens = []
         for i in chosen:
             s = samples[i]
-            donor = next((samples[j] for j in range(len(samples)) if samples[j].ligand_id != s.ligand_id), None)
+            # prefer a SAME-scaffold, different-ligand donor so the negative isolates the ligand change
+            # and does not also swap the scaffold context (too-easy negative); fall back cross-scaffold
+            same = [o for o in samples if o.scaffold_id == s.scaffold_id and o.ligand_id != s.ligand_id]
+            cross = [o for o in samples if o.ligand_id != s.ligand_id]
+            donor = same[0] if same else (cross[0] if cross else None)
             out_real = self.model(s)
             out_lig = self.model(ligand_shuffled(s, donor)) if donor is not None else None
             out_path = self.model(path_shuffled(s, seed=self.step))

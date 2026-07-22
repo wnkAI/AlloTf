@@ -3,8 +3,9 @@ from .few_shot import FewShotCalibrator
 from .sampler import HierarchicalScaffoldSampler
 from .mock_data import make_mock, mock_specs, DIMS
 from .shuffle_controls import ligand_shuffled, path_shuffled
-from .splits import leave_one_scaffold_out, leave_one_family_out, leave_one_ligand_class_out
+from .splits import (leave_one_scaffold_out, leave_one_family_out, leave_one_ligand_out,
+                     leave_one_ligand_chemotype_out, ligand_chemotype_clusters)
 
 __all__ = ["Trainer", "FewShotCalibrator", "HierarchicalScaffoldSampler", "make_mock", "mock_specs", "DIMS",
            "ligand_shuffled", "path_shuffled", "leave_one_scaffold_out", "leave_one_family_out",
-           "leave_one_ligand_class_out"]
+           "leave_one_ligand_out", "leave_one_ligand_chemotype_out", "ligand_chemotype_clusters"]
