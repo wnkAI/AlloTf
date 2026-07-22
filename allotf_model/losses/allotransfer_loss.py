@@ -86,4 +86,4 @@ class AlloTransferLoss(nn.Module):
                                        [lab.get("tier") for lab in labels])
         acc["mech"] = mech if mech is not None else torch.zeros((), device=dev)
         total = sum(self.l[k] * acc[k] for k in acc)
-        return total, {k: float(v) for k, v in acc.items()}
+        return total, {k: float(v.detach()) for k, v in acc.items()}
