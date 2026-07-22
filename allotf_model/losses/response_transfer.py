@@ -1,15 +1,18 @@
-"""Residue-level response-transfer loss: the ligand-induced distal response of the DESIGN, predicted
-per residue in the native teacher's physical channels, must match the FROZEN native response over the
-valid distal residues - in magnitude AND spatial pattern.
+"""Shared response-transfer maths. The design's distal response is decomposed against the FROZEN
+native response as
 
-    L = weighted_Huber(pred, target) + lambda_pattern * (1 - mean_channel_correlation)
+    dH_target_distal = alpha * dH_native_distal + eps_perp
 
-The teacher (TransferSample.native_response) is a per-residue physical descriptor with mixed units
-(CA displacement in A, contact-count change, neighbour counts), so each channel is normalised by a
-FIXED scale before comparison, weighted by the per-residue teacher confidence, and missing/zero-
-confidence residues are fully masked. Huber pins the absolute magnitude; the correlation term pins
-WHICH hinge/interface/DBD residues respond - the whole point of the canonical residue alignment.
-Fails closed: raises if no valid teacher residue survives the mask.
+in the teacher's fixed physical channels (each normalised by a fixed scale so mixed units - CA
+displacement in A, contact-count change, neighbour counts - are comparable):
+
+    alpha    = weighted projection of the design response onto the native direction / native power
+               -> the allosteric transmission GAIN (how strongly the pocket perturbation reaches the
+                  distal region, in the native direction);
+    eps_perp = the component OFF the native direction (ineffective or destructive perturbation).
+
+The three transfer losses (direction / gain / off-path, in their own modules) all read this
+decomposition. Fails closed: needs >= 2 valid distal teacher residues.
 """
 import torch
 import torch.nn.functional as F
@@ -19,6 +22,22 @@ import torch.nn.functional as F
 CHANNEL_SCALES = (3.0, 5.0, 12.0, 12.0)
 
 
+def decompose(target, native, mask, confidence):
+    """target/native: [N_res, D]. mask/confidence: [N_res]. -> dict(alpha, eps_perp [M,D], alignment,
+    w [M], T [M,D], N [M,D], idx). Fails closed on < 2 valid residues."""
+    m = mask.bool() & (confidence > 0)
+    if int(m.sum()) < 2:
+        raise ValueError("response-transfer has < 2 valid distal teacher residues: fail closed")
+    scale = target.new_tensor(CHANNEL_SCALES[:target.shape[1]])
+    T, N, w = target[m] / scale, native[m] / scale, confidence[m]
+    alpha = (w * (T * N).sum(1)).sum() / ((w * (N * N).sum(1)).sum() + 1e-6)
+    eps = T - alpha * N
+    tw = (w.sqrt().unsqueeze(1) * T).reshape(-1)
+    nw = (w.sqrt().unsqueeze(1) * N).reshape(-1)
+    alignment = (tw @ nw) / (tw.norm() * nw.norm() + 1e-6)
+    return {"alpha": alpha, "eps_perp": eps, "alignment": alignment, "w": w, "T": T, "N": N, "idx": m}
+
+
 def _mean_channel_corr(p, t):
     pc, tc = p - p.mean(0, keepdim=True), t - t.mean(0, keepdim=True)
     den = pc.norm(dim=0) * tc.norm(dim=0) + 1e-6
@@ -26,11 +45,11 @@ def _mean_channel_corr(p, t):
 
 
 def transfer_loss(pred, target, residue_mask, confidence, lambda_pattern=0.5, huber_delta=1.0):
-    """pred/target: [N_res, D]. residue_mask/confidence: [N_res]. -> scalar (fails closed on empty)."""
+    """Legacy single response-copy loss (magnitude + pattern). Kept for the plain retrospective mode;
+    the direction/gain/off-path split is the upgrade. Fails closed on empty."""
     m = residue_mask.bool() & (confidence > 0)
-    if int(m.sum()) < 2:                     # need >=2 residues for a pattern correlation
-        raise ValueError("response-transfer has <2 valid teacher residues (empty distal mask or zero "
-                         "confidence): fail closed rather than train on a meaningless target")
+    if int(m.sum()) < 2:
+        raise ValueError("response-transfer has <2 valid teacher residues: fail closed")
     scale = pred.new_tensor(CHANNEL_SCALES[:pred.shape[1]])
     p, t = pred[m] / scale, target[m] / scale
     w = confidence[m].unsqueeze(1)
