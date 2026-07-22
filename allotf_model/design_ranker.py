@@ -17,14 +17,24 @@ DEFAULT_THRESHOLDS = {"t_bind": 0.5, "t_apo": 0.5, "t_align": 0.2, "t_offpath": 
 
 
 def _sigmoid(x):
-    return 1.0 / (1.0 + math.exp(-x))
+    if x >= 0:                                           # numerically stable both tails
+        return 1.0 / (1.0 + math.exp(-x))
+    z = math.exp(x)
+    return z / (1.0 + z)
 
 
 def feasibility(out, thr=None):
-    """out: one model output dict (floats or tensors). -> (is_feasible, reasons list)."""
+    """out: one model output dict (floats or tensors). -> (is_feasible, reasons list). A non-finite
+    metric is rejected, never allowed to slip past a comparison as 'feasible'."""
     t = dict(DEFAULT_THRESHOLDS, **(thr or {}))
     f = lambda k: float(out[k])
     reasons = []
+    for k in ("target_binding", "apo_DNA_competence", "response_alignment", "allosteric_gain",
+              "off_path_response"):
+        if not math.isfinite(f(k)):
+            reasons.append("non_finite_%s" % k)
+    if reasons:
+        return False, reasons
     if _sigmoid(f("target_binding")) <= t["t_bind"]:
         reasons.append("weak_target_binding")
     if f("apo_DNA_competence") <= t["t_apo"]:

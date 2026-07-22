@@ -30,7 +30,10 @@ def decompose(target, native, mask, confidence):
         raise ValueError("response-transfer has < 2 valid distal teacher residues: fail closed")
     scale = target.new_tensor(CHANNEL_SCALES[:target.shape[1]])
     T, N, w = target[m] / scale, native[m] / scale, confidence[m]
-    alpha = (w * (T * N).sum(1)).sum() / ((w * (N * N).sum(1)).sum() + 1e-6)
+    power = (w * (N * N).sum(1)).sum()                   # weighted native power
+    if float(power) < 1e-8:
+        raise ValueError("native response power ~ 0: direction/gain undefined, fail closed")
+    alpha = (w * (T * N).sum(1)).sum() / power           # exact denom -> eps_perp is weighted-orthogonal
     eps = T - alpha * N
     tw = (w.sqrt().unsqueeze(1) * T).reshape(-1)
     nw = (w.sqrt().unsqueeze(1) * N).reshape(-1)

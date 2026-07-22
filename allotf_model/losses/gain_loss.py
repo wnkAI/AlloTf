@@ -9,14 +9,17 @@ Two regimes:
         L_gain = relu(alpha_min - alpha) + relu(alpha - alpha_max)
     too low -> no response; too high -> apo leakage / constitutive-ON / unfolding.
 """
+import math
+
 import torch
 import torch.nn.functional as F
 
 
 def gain_pretrain_loss(predicted_gain, native_gain, delta=1.0):
     pg = predicted_gain if torch.is_tensor(predicted_gain) else torch.tensor(float(predicted_gain))
-    ng = pg.new_tensor(float(native_gain))
-    return F.huber_loss(pg, ng, delta=delta)
+    if not math.isfinite(float(native_gain)):
+        return pg * 0.0                                  # no pocket / undefined target: skip, don't NaN
+    return F.huber_loss(pg, pg.new_tensor(float(native_gain)), delta=delta)
 
 
 def gain_band_loss(alpha, alpha_min=0.5, alpha_max=2.0):

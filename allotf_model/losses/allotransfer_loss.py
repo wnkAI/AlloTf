@@ -20,8 +20,8 @@ from .offpath_loss import offpath_loss
 from .gain_loss import gain_band_loss
 from ..model.joint_function_head import CLASSES
 
-DEFAULT_LAMBDAS = {"func": 1.0, "apo": 0.7, "release": 1.0, "dir": 0.5, "gain": 0.3, "off": 0.3,
-                   "bind": 0.3, "apocomp": 0.5, "cons": 0.3, "rank": 0.5, "mech": 0.5}
+DEFAULT_LAMBDAS = {"func": 1.0, "apo": 0.7, "release": 1.0, "dir": 0.5, "gain": 0.3, "gainhead": 0.2,
+                   "off": 0.3, "bind": 0.3, "apocomp": 0.5, "cons": 0.3, "rank": 0.5, "mech": 0.5}
 _SENSOR = CLASSES.index("functional_sensor")
 _CONST_ON = CLASSES.index("constitutive_ON")
 _TIER = {"functional_sensor": 2, "binder_only": 1}          # else 0
@@ -54,7 +54,7 @@ class AlloTransferLoss(nn.Module):
 
     def forward(self, outputs, labels, mech=None):
         dev = outputs[0]["S_design"].device
-        keys = ("func", "apo", "release", "dir", "gain", "off", "bind", "apocomp", "cons")
+        keys = ("func", "apo", "release", "dir", "gain", "gainhead", "off", "bind", "apocomp", "cons")
         acc = {k: torch.zeros((), device=dev) for k in keys}
         cnt = {k: 0 for k in keys}
 
@@ -83,6 +83,10 @@ class AlloTransferLoss(nn.Module):
             acc["off"] = acc["off"] + offpath_loss(*args); cnt["off"] += 1
             acc["gain"] = acc["gain"] + gain_band_loss(out["allosteric_gain"], self.alpha_min, self.alpha_max)
             cnt["gain"] += 1
+            # supervise the coupling-gain head to predict the analytic gain (else it gets no gradient)
+            acc["gainhead"] = acc["gainhead"] + nn.functional.huber_loss(
+                out["gain_mean"], out["allosteric_gain"].detach())
+            cnt["gainhead"] += 1
 
             if lab.get("bind") is not None:
                 acc["bind"] = acc["bind"] + nn.functional.binary_cross_entropy_with_logits(

@@ -81,17 +81,16 @@ class AlloTransfer(nn.Module):
         self.gain = CouplingGainHead(h_dim)
         self.joint = JointFunctionHead(h_dim, h_dim, phys_dim)
 
-    def _region_gains(self, predicted, native, ts):
+    def _region_gains(self, predicted, native, ts, base_mask, nconf):
         """Per-region allosteric gain alpha, restricted to each transduction region (analytic)."""
         out = {}
         predicted = predicted.detach()                 # attribution only, not a gradient path
         for name in GAIN_REGIONS:
-            region = getattr(ts, name) & ts.distal_mask
+            region = getattr(ts, name) & base_mask
             try:
-                out[name.replace("_mask", "")] = float(
-                    decompose(predicted, native, region, ts.native_response_confidence)["alpha"])
+                out[name.replace("_mask", "")] = float(decompose(predicted, native, region, nconf)["alpha"])
             except ValueError:
-                out[name.replace("_mask", "")] = 0.0       # < 2 residues in region: no attribution
+                out[name.replace("_mask", "")] = 0.0   # < 2 residues in region: no attribution
         return out
 
     def forward(self, ts):
@@ -104,14 +103,17 @@ class AlloTransfer(nn.Module):
                                       self.apo_context_head(t["apo_field"]),
                                       self.lig_context_head(t["lig_field"])], dim=1)   # [N_res, 4]
 
-        # alpha * native + eps_perp decomposition on the valid distal residues
-        d = decompose(predicted_native, ts.native_response, ts.distal_mask, ts.native_response_confidence)
+        # one mask everywhere: distal AND has a native response; teacher detached (never gets gradient)
+        base_mask = ts.distal_mask & ts.native_response_mask
+        native = ts.native_response.detach()
+        nconf = ts.native_response_confidence.detach()
+        d = decompose(predicted_native, native, base_mask, nconf)   # alpha * native + eps_perp
         offpath = (d["w"].unsqueeze(1) * d["eps_perp"] ** 2).sum() / (d["w"].sum() * d["eps_perp"].shape[1])
 
         dH_distal = _pool(dH_field, ts.distal_mask)
         hinge_repr = _pool(dH_field, ts.hinge_mask)
         phys_conf = (ts.physics_aux_confidence * ts.physics_aux_mask.float()).mean()
-        region_contrib = self._region_gains(predicted_native, ts.native_response, ts)
+        region_contrib = self._region_gains(predicted_native, native, ts, base_mask, nconf)
         gain = self.gain(dH_distal, hinge_repr, t["lig_dbd"], phys_conf, region_contrib)
 
         release = self.release(t["apo_dbd"], t["lig_dbd"])
@@ -133,6 +135,6 @@ class AlloTransfer(nn.Module):
                 "bind_logit": self.bind(t["pocket_ligand"]).squeeze(-1),
                 "dH_target_field": dH_field,
                 "predicted_native_response": predicted_native,
-                "native_response": ts.native_response.detach(),
-                "native_response_mask": ts.native_response_mask,
-                "native_response_confidence": ts.native_response_confidence}
+                "native_response": native,                       # already detached
+                "native_response_mask": base_mask,               # loss uses the SAME combined mask
+                "native_response_confidence": nconf}
