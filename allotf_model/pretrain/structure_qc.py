@@ -93,7 +93,7 @@ def qc_scaffold_structures(scaffold_dir, sid):
     ref = max(uniq, key=lambda cand: sum(counts[s] for s in uniq if _align_identity(s, cand)[0] >= MIN_IDENTITY))
     in_cluster = sum(counts[s] for s in uniq if _align_identity(s, ref)[0] >= MIN_IDENTITY)
 
-    report = {"reference_len": len(ref), "n_structures": len(mains),
+    report = {"reference_len": len(ref), "reference_seq": ref, "n_structures": len(mains),
               "n_in_dominant_cluster": in_cluster, "n_variant_outliers": len(mains) - in_cluster,
               "structures": {}, "ligand_inventory": {}}
     for state, paths in (("apo", apo), ("holo", holo)):
