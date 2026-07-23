@@ -21,7 +21,8 @@ from .gain_loss import gain_band_loss
 from ..model.joint_function_head import CLASSES
 
 DEFAULT_LAMBDAS = {"func": 1.0, "apo": 0.7, "release": 1.0, "dir": 0.5, "gain": 0.3, "gainhead": 0.2,
-                   "off": 0.3, "bind": 0.3, "apocomp": 0.5, "cons": 0.3, "rank": 0.5, "mech": 0.5}
+                   "off": 0.3, "context": 0.3, "bind": 0.3, "apocomp": 0.5, "cons": 0.3, "rank": 0.5,
+                   "mech": 0.5}
 _SENSOR = CLASSES.index("functional_sensor")
 _CONST_ON = CLASSES.index("constitutive_ON")
 _TIER = {"functional_sensor": 2, "binder_only": 1}          # else 0
@@ -54,7 +55,8 @@ class AlloTransferLoss(nn.Module):
 
     def forward(self, outputs, labels, mech=None):
         dev = outputs[0]["S_design"].device
-        keys = ("func", "apo", "release", "dir", "gain", "gainhead", "off", "bind", "apocomp", "cons")
+        keys = ("func", "apo", "release", "dir", "gain", "gainhead", "off", "context", "bind",
+                "apocomp", "cons")
         acc = {k: torch.zeros((), device=dev) for k in keys}
         cnt = {k: 0 for k in keys}
 
@@ -76,16 +78,22 @@ class AlloTransferLoss(nn.Module):
             if m is not None:
                 acc["release"] = acc["release"] + m; cnt["release"] += 1
 
-            # response transfer: direction + off-path always; gain kept in a useful band
-            args = (out["predicted_native_response"], out["native_response"],
-                    out["native_response_mask"], out["native_response_confidence"])
-            acc["dir"] = acc["dir"] + direction_loss(*args); cnt["dir"] += 1
-            acc["off"] = acc["off"] + offpath_loss(*args); cnt["off"] += 1
+            # response transfer on the DELTA channels only (0,1); direction + off-path + gain band
+            pred, nat = out["predicted_native_response"], out["native_response"]
+            m, c = out["native_response_mask"], out["native_response_confidence"]
+            acc["dir"] = acc["dir"] + direction_loss(pred[:, :2], nat[:, :2], m, c); cnt["dir"] += 1
+            acc["off"] = acc["off"] + offpath_loss(pred[:, :2], nat[:, :2], m, c); cnt["off"] += 1
             acc["gain"] = acc["gain"] + gain_band_loss(out["allosteric_gain"], self.alpha_min, self.alpha_max)
             cnt["gain"] += 1
-            # supervise the coupling-gain head to predict the analytic gain (else it gets no gradient)
-            acc["gainhead"] = acc["gainhead"] + nn.functional.huber_loss(
-                out["gain_mean"], out["allosteric_gain"].detach())
+            # context channels (2,3 = absolute apo/holo neighbours) supervised on their OWN, not via alpha
+            mm = m.bool() & (c > 0)
+            acc["context"] = acc["context"] + (nn.functional.huber_loss(pred[mm, 2], nat[mm, 2])
+                                               + nn.functional.huber_loss(pred[mm, 3], nat[mm, 3]))
+            cnt["context"] += 1
+            # coupling-gain head: heteroscedastic Gaussian NLL trains BOTH the mean and the log-variance
+            logvar = out["gain_logvar"]
+            err = out["gain_mean"] - out["allosteric_gain"].detach()
+            acc["gainhead"] = acc["gainhead"] + 0.5 * (torch.exp(-logvar) * err ** 2 + logvar)
             cnt["gainhead"] += 1
 
             if lab.get("bind") is not None:

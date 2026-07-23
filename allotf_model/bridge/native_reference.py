@@ -79,17 +79,25 @@ def extract(apo_pdb, holo_pdb, mapping, distal_idx):
     return resp, conf
 
 
+# only the ligand-induced STATE-CHANGE channels define the response direction/gain; channels 2-3
+# (n_neighbours_apo / _holo) are absolute structural background, not a response, and must not enter
+# alpha or the direction (else the gain mixes in "how many neighbours a residue happens to have").
+_DELTA = slice(0, 2)      # ca_displacement, contact_count_change
+
+
 def _unit_direction(response):
-    """Per-residue unit response vector - the native DNA-release DIRECTION the design must align to."""
-    return response / (response.norm(dim=1, keepdim=True) + 1e-6)
+    """Per-residue unit response vector over the delta channels - the native DNA-release DIRECTION."""
+    delta = response[:, _DELTA]
+    return delta / (delta.norm(dim=1, keepdim=True) + 1e-6)
 
 
 def _transmission_gain(response, distal_mask, pocket_idx):
-    """g_native = ||response_distal|| / ||response_pocket|| - the scaffold's transmission efficiency."""
-    dist = response[distal_mask.bool()].norm()
+    """g_native = ||delta_distal|| / ||delta_pocket|| - transmission efficiency, delta channels only."""
+    delta = response[:, _DELTA]
+    dist = delta[distal_mask.bool()].norm()
     if pocket_idx is None or len(pocket_idx) == 0:
         return float("nan")
-    pk = response[torch.as_tensor(list(pocket_idx), dtype=torch.long)].norm()
+    pk = delta[torch.as_tensor(list(pocket_idx), dtype=torch.long)].norm()
     return float(dist / (pk + 1e-6))
 
 

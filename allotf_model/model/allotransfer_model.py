@@ -107,32 +107,39 @@ class AlloTransfer(nn.Module):
         base_mask = ts.distal_mask & ts.native_response_mask
         native = ts.native_response.detach()
         nconf = ts.native_response_confidence.detach()
-        d = decompose(predicted_native, native, base_mask, nconf)   # alpha * native + eps_perp
+        # decompose ONLY on the response-delta channels (0,1); channels 2-3 are absolute background
+        d = decompose(predicted_native[:, :2], native[:, :2], base_mask, nconf)   # alpha * native + eps
         offpath = (d["w"].unsqueeze(1) * d["eps_perp"] ** 2).sum() / (d["w"].sum() * d["eps_perp"].shape[1])
 
         dH_distal = _pool(dH_field, ts.distal_mask)
         hinge_repr = _pool(dH_field, ts.hinge_mask)
         phys_conf = (ts.physics_aux_confidence * ts.physics_aux_mask.float()).mean()
-        region_contrib = self._region_gains(predicted_native, native, ts, base_mask, nconf)
+        region_contrib = self._region_gains(predicted_native[:, :2], native[:, :2], ts, base_mask, nconf)
         gain = self.gain(dH_distal, hinge_repr, t["lig_dbd"], phys_conf, region_contrib)
 
         release = self.release(t["apo_dbd"], t["lig_dbd"])
         physics_masked = ts.physics_aux * ts.physics_aux_confidence.clamp(0, 1) * ts.physics_aux_mask.float()
-        joint = self.joint(t["apo_dbd"], t["lig_dbd"], dH_distal, t["ligand_vec"], release, physics_masked)
+        target_binding = self.bind(t["pocket_ligand"]).squeeze(-1)
+        apo_competence = torch.sigmoid(self.apo_competence(t["apo_dbd"]).squeeze(-1))
+        # the four teacher-match scalars enter the functional head explicitly
+        teacher_match = torch.stack([d["alignment"], d["alpha"], offpath, apo_competence])
+        joint = self.joint(t["apo_dbd"], t["lig_dbd"], dH_distal, t["ligand_vec"], release,
+                           physics_masked, teacher_match)
 
         return {**release, **joint,
                 # the seven judgments
-                "target_binding": self.bind(t["pocket_ligand"]).squeeze(-1),
-                "apo_DNA_competence": torch.sigmoid(self.apo_competence(t["apo_dbd"]).squeeze(-1)),
+                "target_binding": target_binding,
+                "apo_DNA_competence": apo_competence,
                 "response_alignment": d["alignment"],
                 "allosteric_gain": d["alpha"],
-                "gain_mean": gain["gain_mean"], "gain_uncertainty": gain["gain_uncertainty"],
+                "gain_mean": gain["gain_mean"], "gain_logvar": gain["gain_logvar"],
+                "gain_uncertainty": gain["gain_uncertainty"],
                 "gain_region_contributions": gain["gain_region_contributions"],
                 "off_path_response": offpath,
                 "DNA_release_margin": release["release_margin"],
                 "functional_sensor_probability": joint["S_design"],
                 # fields the losses consume
-                "bind_logit": self.bind(t["pocket_ligand"]).squeeze(-1),
+                "bind_logit": target_binding,
                 "dH_target_field": dH_field,
                 "predicted_native_response": predicted_native,
                 "native_response": native,                       # already detached

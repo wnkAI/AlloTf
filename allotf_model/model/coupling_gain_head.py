@@ -1,8 +1,9 @@
 """Coupling-gain head: predicts the allosteric transmission gain alpha and its uncertainty from the
-propagated distal response, the native direction, the hinge/interface representation and the physics
-confidence. Deliberately SMALL and interpretable - with few cross-scaffold examples a large head would
-just memorise scaffold identity. The per-region contributions are computed analytically (not learned),
-so the head predicts a scalar gain + uncertainty while attribution stays transparent.
+propagated distal response, the hinge/interface representation and the physics confidence. Deliberately
+SMALL and interpretable - with few cross-scaffold examples a large head would just memorise scaffold
+identity. Per-region contributions are computed analytically (not learned), so the head predicts a
+scalar gain + a heteroscedastic log-variance (trained via Gaussian NLL) while attribution stays
+transparent.
 """
 import torch
 import torch.nn as nn
@@ -17,6 +18,8 @@ class CouplingGainHead(nn.Module):
 
     def forward(self, dH_distal, hinge_repr, dbd_repr, physics_conf, region_contributions):
         x = torch.cat([dH_distal, hinge_repr, dbd_repr, physics_conf.reshape(1)])
-        out = self.net(x)
-        return {"gain_mean": out[0], "gain_uncertainty": torch.exp(0.5 * out[1]),
+        mean, raw_logvar = self.net(x)
+        logvar = raw_logvar.clamp(-8.0, 8.0)             # trained by Gaussian NLL in the loss
+        return {"gain_mean": mean, "gain_logvar": logvar,
+                "gain_uncertainty": torch.exp(0.5 * logvar),
                 "gain_region_contributions": region_contributions}
