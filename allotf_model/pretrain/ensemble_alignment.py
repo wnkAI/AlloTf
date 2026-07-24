@@ -102,4 +102,5 @@ def align_ensemble(apo_paths, holo_paths, reference_seq, dbd_idx, distal_idx):
     return {"response": torch.tensor(resp, dtype=torch.float32),
             "confidence": torch.tensor(conf, dtype=torch.float32),
             "dbd_rigid_motion": _rigid_motion(apo_mean, holo_mean, sorted(dbd)),
+            "ca_apo": apo_mean,                          # {canonical_index: mean CA coord} for graph building
             "n_apo": len(aligned["apo"]), "n_holo": len(aligned["holo"]), "channels": CHANNELS}

@@ -97,6 +97,56 @@ def dbd_evidence(scaffold_dir, sid, reference_seq, cutoff=POCKET_CUTOFF):
             "dbd_contact_residues": sorted(ci for ci, f in freq.items() if f >= 0.5)}
 
 
+def hinge_evidence(ensemble, pocket_idx, dbd_idx, n_res, contact_cutoff=10.0):
+    """Transduction/hinge CANDIDATES between the pocket and the DBD. Combines apo->holo motion, contact
+    churn, and pocket->DBD communicability bottleneck on the CA contact graph. Pocket, DNA-contact
+    (DBD) and uncovered residues are excluded. Outputs an evidence SCORE + component scores - NOT a
+    final region (curation decides)."""
+    from .bottleneck_targets import communicability_bottleneck
+    resp, ca = ensemble["response"], ensemble["ca_apo"]
+    covered = sorted(ca)
+    motion = resp[:, 0].numpy()
+    churn = np.abs(resp[:, 1].numpy())
+    coords = np.array([ca[i] for i in covered])
+    d = np.linalg.norm(coords[:, None, :] - coords[None, :, :], axis=2)
+    src, dst = [], []
+    for a in range(len(covered)):
+        for b in range(len(covered)):
+            if a != b and d[a, b] < contact_cutoff:
+                src.append(covered[a]); dst.append(covered[b])
+    import torch
+    bott = communicability_bottleneck(n_res, torch.tensor([src, dst], dtype=torch.long),
+                                      list(pocket_idx), list(dbd_idx)).numpy()
+    pocket, dbd = set(int(i) for i in pocket_idx), set(int(i) for i in dbd_idx)
+    dbd_covered = any(i in ca for i in dbd)
+    note = None
+    # a transduction residue must lie ON the pocket->DBD communication path (bottleneck > 0); this
+    # excludes floppy termini that move a lot but carry no signal. If the DBD is absent from the
+    # apo/holo ensemble (e.g. core-only LacI structures) the path cannot be computed - flag it and fall
+    # back to motion+churn, never pretend a transduction path exists.
+    if dbd_covered:
+        cand = [i for i in covered if i not in pocket and i not in dbd and bott[i] > 0]
+    else:
+        cand = [i for i in covered if i not in pocket and i not in dbd]
+        note = "DBD absent from apo/holo ensemble - pocket->DBD path unavailable, needs operator structures"
+    if not cand:
+        return {"hinge_score": {}, "hinge_candidates": [], "note": note or "no candidate residues"}
+
+    def z(vec):
+        v = np.array([vec[i] for i in cand]); s = v.std()
+        return (v - v.mean()) / s if s > 0 else v * 0.0
+    zm, zc, zb = z(motion), z(churn), z(bott)
+    weights = (1.0, 1.0, 1.0) if dbd_covered else (1.0, 1.0, 0.0)
+    score = {cand[k]: round(float(weights[0] * zm[k] + weights[1] * zc[k] + weights[2] * zb[k]), 3)
+             for k in range(len(cand))}
+    ranked = sorted(score, key=lambda i: -score[i])
+    comp = {cand[k]: {"motion": round(float(zm[k]), 2), "churn": round(float(zc[k]), 2),
+                      "bottleneck": round(float(zb[k]), 2)} for k in range(len(cand))}
+    return {"hinge_score": {i: score[i] for i in ranked}, "hinge_candidates": ranked[:20],
+            "components": {i: comp[i] for i in ranked[:20]},
+            "dbd_in_ensemble": dbd_covered, "note": note}
+
+
 def pocket_evidence(scaffold_dir, sid, reference_seq, cutoff=POCKET_CUTOFF):
     """-> dict(pocket_frequency {canonical_index: freq}, n_holo, effectors, needs)."""
     holo = sorted(glob.glob(os.path.join(scaffold_dir, "holo", "*.cif")))
