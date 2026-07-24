@@ -46,6 +46,57 @@ def _protein_and_effector(cif, sid):
     return main, eff[1], eff[0]
 
 
+_DNA_RES = {"DA", "DC", "DG", "DT", "DU"}
+
+
+def _protein_and_dna(cif, sid):
+    """-> (longest protein chain residues [(aa1, heavy coords)], DNA heavy-atom coords [K,3] or None)."""
+    model = next(iter(_PARSER.get_structure(sid, cif)))
+    chains, dna = {}, []
+    for ch in model:
+        res = []
+        for r in ch:
+            nm = r.get_resname().strip().upper()
+            if r.id[0] == " " and nm in AA3TO1 and r.has_id("CA"):
+                res.append((AA3TO1[nm], np.array([a.coord for a in r if a.element != "H"])))
+            elif nm in _DNA_RES:
+                dna.extend(a.coord for a in r if a.element != "H")
+        if len(res) >= _MIN_CHAIN:
+            chains[ch.id] = res
+    if not chains:
+        return None, None
+    return max(chains.values(), key=len), (np.array(dna) if dna else None)
+
+
+def dbd_evidence(scaffold_dir, sid, reference_seq, cutoff=POCKET_CUTOFF):
+    """DBD candidates = protein residues within cutoff of operator DNA, across operator complexes.
+    HIGH confidence (same-scaffold experimental operator). No operator structure -> empty + a flag so
+    the DBD-contact loss is MASKED, never faked from a homology/predicted complex."""
+    ops = sorted(glob.glob(os.path.join(scaffold_dir, "dna", "*.cif")) +
+                 glob.glob(os.path.join(scaffold_dir, "ternary", "*.cif")))
+    counts, used = {}, 0
+    for p in ops:
+        main, dna = _protein_and_dna(p, sid)
+        if main is None or dna is None or len(dna) == 0:
+            continue
+        seq = "".join(a for a, _ in main)
+        ident, _, ref_to_seq = _align_identity(seq, reference_seq)
+        if ident < MIN_IDENTITY:
+            continue
+        used += 1
+        for ci, pos in ref_to_seq.items():
+            atoms = main[pos][1]
+            if atoms.size and np.linalg.norm(atoms[:, None, :] - dna[None, :, :], axis=2).min() <= cutoff:
+                counts[ci] = counts.get(ci, 0) + 1
+    if used == 0:
+        return {"dbd_frequency": {}, "n_operator": 0, "confidence": "none",
+                "note": "no_operator_structure - DBD-contact loss must be masked (family template only)"}
+    freq = {ci: round(c / used, 3) for ci, c in counts.items()}
+    return {"dbd_frequency": dict(sorted(freq.items(), key=lambda kv: -kv[1])), "n_operator": used,
+            "confidence": "high_same_scaffold_experimental",
+            "dbd_contact_residues": sorted(ci for ci, f in freq.items() if f >= 0.5)}
+
+
 def pocket_evidence(scaffold_dir, sid, reference_seq, cutoff=POCKET_CUTOFF):
     """-> dict(pocket_frequency {canonical_index: freq}, n_holo, effectors, needs)."""
     holo = sorted(glob.glob(os.path.join(scaffold_dir, "holo", "*.cif")))

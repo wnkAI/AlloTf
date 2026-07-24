@@ -14,7 +14,7 @@ from .rcsb import download_assembly_cif
 DIRECTIONAL_7 = ["TetR", "QacR", "TtgR", "RamR", "EthR", "KstR", "LacI"]
 
 
-def fetch(qc_path, manifest_path, out_dir, scaffolds=None, cap=12):
+def fetch(qc_path, manifest_path, out_dir, scaffolds=None, cap=12, states=("apo", "holo")):
     scaffolds = scaffolds or DIRECTIONAL_7
     qc = json.load(open(qc_path))["scaffolds"]
     man = json.load(open(manifest_path))
@@ -25,7 +25,7 @@ def fetch(qc_path, manifest_path, out_dir, scaffolds=None, cap=12):
         res = {e["pdb_id"]: (e.get("resolution") or 99.0) for e in man[name]["entries"]}
         passed = qc[name]["passed"]
         log[name] = {}
-        for state in ("apo", "holo"):
+        for state in states:
             ids = sorted(passed.get(state, []), key=lambda p: res.get(p, 99.0))   # best resolution first
             take = ids[:cap]
             d = os.path.join(out_dir, name, state)
