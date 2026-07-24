@@ -96,6 +96,27 @@ def fetch_entry(pdb_id):
         "title": (e.get("struct") or {}).get("title", "")}
 
 
+_COMP_QUERY = """query($id:String!){ chem_comp(comp_id:$id){
+  rcsb_chem_comp_descriptor{ SMILES_stereo SMILES } } }"""
+
+
+def fetch_comp_smiles(comp_id):
+    """Canonical SMILES for a ligand comp id (for chemotype clustering). None if unavailable."""
+    for k in range(3):
+        try:
+            r = requests.post(GRAPHQL_URL, json={"query": _COMP_QUERY, "variables": {"id": comp_id}},
+                              headers=_HEADERS, timeout=30)
+            if r.status_code == 200:
+                d = ((r.json().get("data") or {}).get("chem_comp") or {}).get("rcsb_chem_comp_descriptor") or {}
+                return d.get("SMILES_stereo") or d.get("SMILES")
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(1.5 ** (k + 1)); continue
+            return None
+        except requests.RequestException:
+            time.sleep(1.5 ** (k + 1))
+    return None
+
+
 def download_assembly_cif(pdb_id, out_path):
     """Biological assembly 1 mmCIF (functional oligomer), not the asymmetric unit."""
     r = _get(ASSEMBLY_CIF % pdb_id)

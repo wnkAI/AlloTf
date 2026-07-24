@@ -20,7 +20,10 @@ IONS = {"MG", "MN", "ZN", "CA", "NA", "K", "CL", "BR", "IOD", "FE", "FE2", "NI",
         "HG", "SR", "CS", "RB", "BA", "PB", "AU", "AG", "PT", "SO4", "PO4", "NO3", "F"}
 ADDITIVES = {"GOL", "EDO", "PEG", "PG4", "PGE", "1PE", "2PE", "P6G", "ACT", "ACY", "DMS", "MPD",
              "FMT", "TRS", "EPE", "IMD", "BME", "CIT", "TLA", "MES", "MLI", "SCN", "AZI", "DTT",
-             "BOG", "LDA", "OLC", "PEO", "12P", "15P", "BU3", "FLC", "UNX", "UNL", "DOD"}
+             "BOG", "LDA", "OLC", "PEO", "12P", "15P", "BU3", "FLC", "UNX", "UNL", "DOD",
+             # cryoprotectants / detergents / PEG oligomers that are not effectors
+             "HEZ", "HEX", "PE4", "7PE", "MRD", "IPA", "BTB", "POL", "DIO", "XPE", "N8E", "C8E",
+             "LMT", "DDM", "PG0", "PG5", "1PG", "33O", "P33", "DR6", "TAR", "MG8", "SPD", "SPM"}
 
 
 def classify(meta):
