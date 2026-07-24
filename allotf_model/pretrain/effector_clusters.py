@@ -9,8 +9,9 @@ actual response direction. Ligands with no retrievable SMILES are reported, not 
 """
 import glob
 import os
+from collections import Counter
 
-from .region_evidence import _protein_and_effector
+from .structure_parse import parse_protomers
 from .rcsb import fetch_comp_smiles
 from ..train.splits import ligand_chemotype_clusters
 
@@ -19,9 +20,9 @@ def cluster_effectors(scaffold_dir, sid, reference_seq, cutoff=0.4):
     """-> dict(clusters {cluster_id: {comp_ids, pdbs, n_holo}}, smiles, no_smiles, pdb_effector)."""
     pdb_eff = {}
     for p in sorted(glob.glob(os.path.join(scaffold_dir, "holo", "*.cif"))):
-        _, _, eff = _protein_and_effector(p, sid)
-        if eff:
-            pdb_eff[os.path.splitext(os.path.basename(p))[0]] = eff
+        effs = [pr["effector"][0] for pr in parse_protomers(p, sid, reference_seq) if pr["effector"]]
+        if effs:                                          # per-PDB effector = the comp bound on most protomers
+            pdb_eff[os.path.splitext(os.path.basename(p))[0]] = Counter(effs).most_common(1)[0][0]
 
     comp_ids = sorted(set(pdb_eff.values()))
     smiles, no_smiles = {}, []

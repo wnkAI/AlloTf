@@ -1,51 +1,47 @@
-"""Canonical ensemble alignment for a scaffold's apo/holo structures. Residues are keyed by the
-CANONICAL reference position via SEQUENCE ALIGNMENT (never PDB resseq - different entries renumber,
-carry insertion codes, missing loops and construct mutations), so a residue means the same thing
-across every PDB. Variant outliers (identity < MIN_IDENTITY to the reference) are dropped.
+"""Canonical ensemble alignment. Structures are parsed PROTOMER-AWARE (structure_parse): each protein
+chain is aligned to the reference by SEQUENCE (never resseq). Every protomer is rigid-body fit onto the
+reference on the STABLE ligand-binding CORE (shared canonical residues outside the DBD and the distal
+region) - never the DBD, so domain motion is preserved - and the protomers of one PDB are AVERAGED into
+a single observation (a homodimer contributes one observation, not two correlated ones).
 
-Every structure is superposed onto the reference by rigid-body fit on the STABLE ligand-binding CORE
-(shared canonical residues outside the DBD and the distal response region) - never on the DBD, so real
-domain motion is preserved. Then:
-  - per-residue native response = holo-ensemble mean vs apo-ensemble mean (native_reference CHANNELS);
-  - confidence = coverage (vs the aligned structures) x inter-conformer consistency;
-  - dbd_rigid_motion = the apo->holo rotation + translation of the DBD as a whole, reported separately,
-    NOT used in the fit.
+Then per residue: native response = holo-ensemble mean vs apo-ensemble mean (native_reference CHANNELS);
+confidence = coverage x inter-conformer consistency; dbd_rigid_motion = the apo->holo rotation +
+translation of the DBD as a whole (reported, not used in the fit).
 """
+from collections import defaultdict
+
 import numpy as np
 import torch
-from Bio.PDB import MMCIFParser, PDBParser
 from Bio.SVDSuperimposer import SVDSuperimposer
 
-from .structure_qc import _align_identity, AA3TO1, MIN_IDENTITY, _MIN_CHAIN
+from .structure_parse import parse_protomers
 from ..bridge.native_reference import CHANNELS, D_TEACHER
 
-_CIF, _PDB = MMCIFParser(QUIET=True), PDBParser(QUIET=True)
 _CONTACT = 8.0
-
-
-def _canonical_ca(path, ref):
-    """{canonical_index: CA coord} for the longest protein chain, aligned to the reference sequence.
-    None if the chain is a variant outlier (identity < MIN_IDENTITY)."""
-    parser = _CIF if path.lower().endswith(".cif") else _PDB
-    model = next(iter(parser.get_structure("S", path)))
-    chains = {}
-    for ch in model:
-        res = [(AA3TO1[r.get_resname()], r["CA"].coord.astype(float)) for r in ch
-               if r.id[0] == " " and r.get_resname() in AA3TO1 and r.has_id("CA")]
-        if len(res) >= _MIN_CHAIN:
-            chains[ch.id] = res
-    if not chains:
-        return None
-    main = max(chains.values(), key=len)
-    ident, _, r2s = _align_identity("".join(a for a, _ in main), ref)
-    if ident < MIN_IDENTITY:
-        return None
-    return {ci: main[pos][1] for ci, pos in r2s.items()}
 
 
 def _fit(ref_pts, mob_pts):
     svd = SVDSuperimposer(); svd.set(ref_pts, mob_pts); svd.run()
     return svd.get_rotran()
+
+
+def _file_obs(proto_list, ref, dbd, distal):
+    """Fit each protomer onto ref (core frame) and AVERAGE them -> one {ci: CA} observation per file."""
+    fitted = []
+    for pr in proto_list:
+        s = pr["canonical_ca"]
+        frame = [i for i in (set(ref) & set(s)) if i not in dbd and i not in distal]
+        if len(frame) < 3:
+            continue
+        rot, tran = _fit(np.array([ref[i] for i in frame]), np.array([s[i] for i in frame]))
+        fitted.append({i: s[i] @ rot + tran for i in s})
+    if not fitted:
+        return None
+    acc = defaultdict(list)
+    for f in fitted:
+        for ci, c in f.items():
+            acc[ci].append(c)
+    return {ci: np.mean(v, 0) for ci, v in acc.items()}
 
 
 def _contacts(coords):
@@ -62,37 +58,37 @@ def _rigid_motion(apo_xyz, holo_xyz, idx):
     return {"rotation_deg": float(angle), "translation": float(np.linalg.norm(tran)), "n_dbd": len(shared)}
 
 
-def align_ensemble(apo_paths, holo_paths, reference_seq, dbd_idx, distal_idx):
-    """-> dict(response [N,D], confidence [N], dbd_rigid_motion, n_apo, n_holo). N = len(reference_seq)."""
-    n = len(reference_seq)
+def file_observations(paths, reference_seq, dbd_idx, distal_idx):
+    """-> (ref CA dict, [one averaged observation per file that aligns])."""
+    protos = [pl for pl in (parse_protomers(p, "S", reference_seq) for p in paths) if pl]
+    if not protos:
+        return None, []
+    ref = protos[0][0]["canonical_ca"]
     dbd, distal = set(int(i) for i in dbd_idx), set(int(i) for i in distal_idx)
-    apo = [c for c in (_canonical_ca(p, reference_seq) for p in apo_paths) if c]
-    holo = [c for c in (_canonical_ca(p, reference_seq) for p in holo_paths) if c]
+    obs = [o for o in (_file_obs(pl, ref, dbd, distal) for pl in protos) if o]
+    return ref, obs
+
+
+def align_ensemble(apo_paths, holo_paths, reference_seq, dbd_idx, distal_idx):
+    """-> dict(response [N,D], confidence [N], dbd_rigid_motion, ca_apo, n_apo, n_holo)."""
+    n = len(reference_seq)
+    dbd, distal = set(int(i) for i in dbd_idx), sorted(set(int(i) for i in distal_idx))
+    ref, apo = file_observations(apo_paths, reference_seq, dbd, distal)
+    _, holo = file_observations(holo_paths, reference_seq, dbd, distal)
     if not apo or not holo:
-        raise ValueError("ensemble alignment needs >=1 apo and >=1 holo after sequence alignment")
-    ref = apo[0]
+        raise ValueError("ensemble alignment needs >=1 apo and >=1 holo file after alignment")
 
-    def fit_to_ref(s):
-        frame = [i for i in (set(ref) & set(s)) if i not in dbd and i not in distal]
-        if len(frame) < 3:
-            return None
-        rot, tran = _fit(np.array([ref[i] for i in frame]), np.array([s[i] for i in frame]))
-        return {i: s[i] @ rot + tran for i in s}
-
-    aligned = {"apo": [a for a in (fit_to_ref(s) for s in apo) if a],
-               "holo": [h for h in (fit_to_ref(s) for s in holo) if h]}
     resp, conf = np.zeros((n, D_TEACHER)), np.zeros(n)
     apo_mean, holo_mean = {}, {}
     for ci in range(n):
-        ap = np.array([a[ci] for a in aligned["apo"] if ci in a])
-        hp = np.array([h[ci] for h in aligned["holo"] if ci in h])
+        ap = np.array([a[ci] for a in apo if ci in a])
+        hp = np.array([h[ci] for h in holo if ci in h])
         if len(ap) == 0 or len(hp) == 0:
             continue
         apo_mean[ci], holo_mean[ci] = ap.mean(0), hp.mean(0)
         resp[ci, 0] = np.linalg.norm(holo_mean[ci] - apo_mean[ci])
         spread = float(ap.std(0).sum() + hp.std(0).sum())
-        cover = min(len(ap), len(hp)) / max(len(aligned["apo"]), len(aligned["holo"]), 1)
-        conf[ci] = cover / (1.0 + spread)
+        conf[ci] = min(len(ap), len(hp)) / max(len(apo), len(holo), 1) / (1.0 + spread)
     shared = sorted(set(apo_mean) & set(holo_mean))
     if shared:
         nc_a = dict(zip(shared, _contacts(np.array([apo_mean[i] for i in shared]))))
@@ -102,5 +98,4 @@ def align_ensemble(apo_paths, holo_paths, reference_seq, dbd_idx, distal_idx):
     return {"response": torch.tensor(resp, dtype=torch.float32),
             "confidence": torch.tensor(conf, dtype=torch.float32),
             "dbd_rigid_motion": _rigid_motion(apo_mean, holo_mean, sorted(dbd)),
-            "ca_apo": apo_mean,                          # {canonical_index: mean CA coord} for graph building
-            "n_apo": len(aligned["apo"]), "n_holo": len(aligned["holo"]), "channels": CHANNELS}
+            "ca_apo": apo_mean, "n_apo": len(apo), "n_holo": len(holo), "channels": CHANNELS}
