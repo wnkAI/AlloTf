@@ -14,10 +14,12 @@ import os
 import numpy as np
 from Bio.PDB import MMCIFParser
 
-from .structure_qc import _align_identity, AA3TO1, _IONS_ADD, MIN_IDENTITY, _MIN_CHAIN
+from .structure_qc import _align_identity, AA3TO1, MIN_IDENTITY, _MIN_CHAIN
+from .build_manifest import IONS, ADDITIVES
 
 _PARSER = MMCIFParser(QUIET=True)
 POCKET_CUTOFF = 5.0
+_NON_EFFECTOR = IONS | ADDITIVES          # comprehensive: a large PEG must not be picked as the effector
 
 
 def _protein_and_effector(cif, sid):
@@ -33,7 +35,7 @@ def _protein_and_effector(cif, sid):
                 res.append((AA3TO1[r.get_resname()], np.array(coords)))
             elif r.id[0].startswith("H_"):
                 nm = r.get_resname().strip().upper()
-                if nm not in _IONS_ADD:
+                if nm not in _NON_EFFECTOR:
                     hets.append((nm, np.array([a.coord for a in r if a.element != "H"])))
         if len(res) >= _MIN_CHAIN:
             chains[ch.id] = res

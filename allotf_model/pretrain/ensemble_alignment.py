@@ -87,7 +87,8 @@ def align_ensemble(apo_paths, holo_paths, mapping, dbd_idx, distal_idx):
         disp = float(np.linalg.norm(holo_mean - apo_mean))
         # inter-conformer spread: consistent residues (small spread relative to displacement) are trusted
         spread = float(apo_pts.std(0).sum() + holo_pts.std(0).sum())
-        cover = min(len(apo_pts), len(holo_pts)) / max(len(apo), len(holo))
+        # coverage against the ALIGNED structures (some inputs may have been skipped on a tiny frame)
+        cover = min(len(apo_pts), len(holo_pts)) / max(len(aligned["apo"]), len(aligned["holo"]), 1)
         conf[ci] = cover / (1.0 + spread)
         resp[ci, 0] = disp                                # ca_displacement (contacts filled below)
 
